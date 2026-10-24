@@ -27,6 +27,7 @@ __all__ = [
     "write_netcdf_groups",
     "write_vector",
     "convert",
+    "sql",
     "rasterize",
     "polygonize",
     "transform_points",
@@ -1086,3 +1087,7 @@ def open_catalog(
     cache_size: int | None = None,
     resampling: str | None = None,
 ) -> Raster: ...
+
+def sql(src: Any, query: str, *, layers: list[str] | None = None) -> Layer:
+    """Run the documented OGR SQL subset; DISTINCT and summaries discard geometry."""
+    ...

@@ -184,6 +184,19 @@ Options are `locationField`, `sortField`, `sortDescending`, `tr`, `te`, `srs`, `
 transparent; tiles in other CRSs are reprojected into the index CRS. See
 [CLI catalogs](cli.md#catalog) for the supported GTI subset.
 
+## SQL queries
+
+`sql(src, query)` returns a `Dataset` using the shared [OGR SQL subset](sql.md).
+Inputs may be a `Dataset`, file bytes, `{ bytes, filename }`, or GeoJSON.
+
+```js
+const result = sql(countries, "SELECT ADMIN, POP_EST/1000000.0 AS millions FROM countries");
+const summary = sql(countries, "SELECT COUNT(*) AS n, SUM(POP_EST) AS population FROM countries");
+```
+
+Raw GeoJSON inputs use the layer name `layer`; use `Layer.from_geojson(..., name=...)`
+(Python) or `fromGeoJSON(src, name)` (JavaScript) to assign another name.
+
 ## Viewshed
 
 ```javascript
