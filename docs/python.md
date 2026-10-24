@@ -311,3 +311,16 @@ Options include `layer`, `location_field`, `sort_field`, `sort_descending`, `tr`
 `bands`, `ot`, `nodata`, `alpha_band`, `cache_size` and `resampling`. Missing grid characteristics
 come from index metadata or one tile header. Dataset masks, source nodata and zero alpha are
 transparent. See [CLI catalogs](cli.md#catalog) for the supported GTI subset.
+
+## Serialized VRTs and uploaded sources
+
+```python
+virtual = terrio.warp("dem.tif", "projected.vrt", t_srs="EPSG:3857", ts=(512, 512))
+window = virtual.read(1, window=(32, 48, 128, 128))
+uploaded = terrio.open_vrt(xml, {"dem.tif": image_bytes})
+```
+
+`open_vrt` accepts source names mapped to file bytes, paths or `PathLike` objects;
+source windows remain lazy. `open_raster(path, lazy=True)` also opens VRT files
+lazily. The [serialized VRT support](cli.md#serialized-virtual-rasters) lists the
+supported transformers, built-in functions, kernels and masks.

@@ -18,6 +18,7 @@ Suites:
     ops               translate, warp, mosaic vs GDAL's tools (compare_ops_with_gdal.py)
     catalogs          indexed real DEM mosaics and HTTP window I/O vs GDAL GTI
                       (compare_catalogs_with_gdal.py)
+    vrt               serialized warped/derived/kernel VRTs, masks and lazy windows
     overviews         source overview selection and HTTP COG bytes vs gdalwarp -ovr
     dem-calc          dem, calc, proximity, sieve vs GDAL's tools (compare_dem_calc_with_gdal.py)
     vector-ops        ogr2ogr options, rasterize, polygonize (compare_vector_ops_with_gdal.py)
@@ -463,6 +464,19 @@ def suite_catalogs(ctx):
         "mixed CRS and Terrio-written indexes cross-read by GDAL. Grids, masks and pixels "
         "are compared (1e-4 numerical tolerance). A small HTTP window verifies one source "
         "opened from a 1,002-feature index and records actual bytes for both implementations.", 2,
+    )
+
+
+def suite_vrt(ctx):
+    """Cross-read virtual rasters, including cropped requests and serialized transformers."""
+    return suite_json_ops(
+        ctx, "vrt", "compare_vrt_with_gdal.py", "VRT interoperability",
+        "GDAL VRT driver, gdalwarp and gdal_translate",
+        "Real USGS pixels through derived bands, kernel filters, masks and warped VRTs, "
+        "including polynomial GCPs, TPS, homographies and RPCs. Whole and cropped reads "
+        "must preserve types, nodata, georeferencing and values; Terrio-authored warped "
+        "descriptions are also read by GDAL. Datum grid availability is matched.",
+        2,
     )
 
 
@@ -1032,6 +1046,7 @@ SUITES = OrderedDict(
         ("windows", suite_windows),
         ("ops", suite_ops),
         ("catalogs", suite_catalogs),
+        ("vrt", suite_vrt),
         ("overviews", suite_overviews),
         ("geolocation", suite_geolocation),
         ("dem-calc", suite_dem_calc),

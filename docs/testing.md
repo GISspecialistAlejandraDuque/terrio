@@ -127,6 +127,14 @@ The catalog suite also supplies a lazy HTTP reader and a deferred URL through Py
 source mapping. Catalog construction transfers zero additional tile bytes; an 8x8 real-DEM
 query must match GDAL exactly and transfer less than half of the 1.6 MB tile.
 
+The `vrt` conformance suite cross-reads GDAL/Terrio virtual rasters on USGS terrain,
+including whole and cropped requests, derived bands, nodata, masks, full and
+separable kernels, and affine/reprojection/GCP/TPS/homography/RPC transforms:
+
+```sh
+python scripts/conformance.py ../terrio-data --only vrt --strict
+```
+
 ### Pansharpening against GDAL
 
 The fetch script downloads Landsat 8 B8/B4/B3/B2 real image pairs from the public
@@ -173,3 +181,8 @@ interleaved measurements and Linux affinity/background-load handling. They run i
 CI's conformance job without downloading benchmark datasets or asserting timing
 thresholds. Performance measurements remain an explicit local task; see
 [Benchmarks](benchmarks.md) for the methodology and latest GDAL version used.
+
+The VRT conformance suite also compares ordinary GeoTIFF warp output against GDAL
+for multiband inputs with distinct per-band nodata, both jointly invalid and
+independently invalid pixels, and a separate destination fill. Nearest and bilinear
+cases require exact pixel agreement (tolerance 0).
