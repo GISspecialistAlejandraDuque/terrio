@@ -80,7 +80,7 @@ fn z_order_and_nodata_transparency() {
     assert!(catalog.read_mask(Window::new(0, 0, 6, 4)).unwrap().iter().all(|v| *v == 255));
 }
 #[test]
-fn extra_alpha_band_masks_overlapping_tiles() {
+fn untagged_extra_band_does_not_mask_overlapping_tiles() {
     let mut input = sources();
     let right = input.get_mut("right.tif").unwrap();
     right.raster.bands = 2;
@@ -89,11 +89,11 @@ fn extra_alpha_band_masks_overlapping_tiles() {
     right.raster.data = RasterData::F64(values);
     let mut catalog = RasterCatalog::from_layer(index(), input, options()).unwrap();
     let result = catalog.read_window(Window::new(0, 0, 6, 4), &[]).unwrap();
-    assert_eq!(&result.raster.band_view(0).as_slice()[..6], &[10.0, 10.0, 10.0, 10.0, 0.0, 0.0]);
-    assert_eq!(&catalog.read_mask(Window::new(0, 0, 6, 4)).unwrap()[..6], &[255, 255, 255, 255, 0, 0]);
+    assert_eq!(&result.raster.band_view(0).as_slice()[..6], &[10.0, 10.0, 20.0, 20.0, 20.0, 20.0]);
+    assert_eq!(&catalog.read_mask(Window::new(0, 0, 6, 4)).unwrap()[..6], &[255; 6]);
     let mut lazy = catalog.into_lazy();
     assert!(lazy.has_mask());
-    assert_eq!(&lazy.read_mask(Window::new(0, 0, 6, 4), None).unwrap().unwrap()[..6], &[255, 255, 255, 255, 0, 0]);
+    assert_eq!(&lazy.read_mask(Window::new(0, 0, 6, 4), None).unwrap().unwrap()[..6], &[255; 6]);
 }
 
 #[test]
@@ -232,6 +232,7 @@ fn requested_bands_limit_reads_and_preserve_order_and_duplicates() {
     assert_eq!(catalog.read_mask(window).unwrap(), vec![255; 16]);
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
 fn selected_data_reads_only_itself_and_the_extra_source_alpha() {
     let mut source = tile(0.0, 0.0);
@@ -241,12 +242,19 @@ fn selected_data_reads_only_itself_and_the_extra_source_alpha() {
     source.raster.data = RasterData::F64(values);
     let mut footprints = index();
     footprints.features.truncate(1);
-    let mut catalog = RasterCatalog::from_layer(
-        footprints,
-        HashMap::from([("left.tif".into(), source)]),
-        CatalogOptions { bands: Some(5), extent: Some((0., 0., 4., 4.)), ..options() },
+    let dir = tempfile::tempdir().unwrap();
+    let tile_path = dir.path().join("left.tif");
+    terrio::write_raster_dataset(
+        &source,
+        tile_path.to_str().unwrap(),
+        &terrio::RasterWriteOptions { creation_options: vec![("ALPHA".into(), "YES".into())], ..Default::default() },
     )
     .unwrap();
+    let path = dir.path().join("index.gti.gpkg");
+    terrio::write_vector(&[footprints], path.to_str().unwrap(), &Default::default()).unwrap();
+    let mut catalog =
+        RasterCatalog::open(path.to_str().unwrap(), CatalogOptions { bands: Some(5), extent: Some((0., 0., 4., 4.)), ..options() })
+            .unwrap();
     let window = Window::new(0, 0, 4, 4);
     let selected = catalog.read_window(window, &[3]).unwrap();
     assert_eq!(selected.raster.band_view(0).as_slice()[0], 0.0);

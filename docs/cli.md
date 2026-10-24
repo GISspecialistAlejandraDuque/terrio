@@ -680,7 +680,9 @@ cache hits, selected features, source pixels (excluding separate mask samples), 
 samples and peak cached datasets. Each tile is warped only over its intersection with the request.
 Band-subset reads (including `translate -b`) load and warp only requested bands plus source alpha.
 Generating output alpha needs validity from all source data bands; a separate dataset-mask request
-likewise computes coverage from every data band. Whole mosaics write in strips.
+likewise computes coverage from every data band, without allocating a final pixel mosaic.
+Untagged extra source bands are ignored rather than treated as alpha. Whole mosaics write in strips.
+Window buffers use fallible allocation so capacity errors return an error.
 
 The supported GTI subset includes `IndexDataset`, `IndexLayer`, `LocationField`, sort order,
 SRS, resolution, extent, band count/type/nodata and alpha color interpretation.

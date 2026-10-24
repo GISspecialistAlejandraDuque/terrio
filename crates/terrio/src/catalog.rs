@@ -439,12 +439,15 @@ impl RasterCatalog {
     /// Dataset-level validity: covered pixels are 255, uncovered or masked pixels are 0.
     pub fn read_mask(&mut self, window: Window) -> Result<Vec<u8>> {
         if self.last_mask.as_ref().is_none_or(|(w, _)| *w != window) {
-            self.read_window(window, &[])?;
+            self.render_window(window, &[], true)?;
         }
         Ok(self.last_mask.as_ref().unwrap().1.clone())
     }
     /// Reads and composites a window; `bands` is 1-based, empty for every band.
     pub fn read_window(&mut self, window: Window, bands: &[usize]) -> Result<RasterDataset> {
+        self.render_window(window, bands, false)
+    }
+    fn render_window(&mut self, window: Window, bands: &[usize], coverage_only: bool) -> Result<RasterDataset> {
         if !window.fits(self.header.raster.cols, self.header.raster.rows) {
             return Err(Error::InvalidArgument("GTI window is outside the catalog".into()));
         }
@@ -466,9 +469,9 @@ impl RasterCatalog {
         let n = window.width.checked_mul(window.height).ok_or_else(|| bad("window dimensions overflow"))?;
         let total = n.checked_mul(wanted.len()).ok_or_else(|| bad("window band count overflows"))?;
         let elements = n.checked_mul(bands.len()).ok_or_else(|| bad("selected bands overflow the window"))?;
-        let mut coverage = vec![0u8; n];
+        let mut coverage = filled_buffer(n, 0u8)?;
         let fill = self.header.nodata().unwrap_or(0.0);
-        let mut out = vec![fill; total];
+        let mut out = filled_buffer(if coverage_only { 0 } else { total }, fill)?;
         for entry in entries {
             let resampling = self.options.resampling.unwrap_or_default();
             let (tile, detected_alpha) = self.source(&entry.location)?;
@@ -531,13 +534,13 @@ impl RasterCatalog {
                 continue;
             }
             let src_window = Window::new(x0, y0, x1 - x0, y1 - y0);
-            let mask = if tile.has_mask() { tile.read_mask(src_window, None)? } else { None };
             let source_bands = tile.band_count();
             if source_bands != count && source_bands != count + 1 && !(alpha == Some(count) && source_bands + 1 == count) {
                 return Err(bad("tile bands must match catalog, optionally with one extra alpha band"));
             }
-            let source_alpha =
-                if source_bands == count + 1 { Some(source_bands) } else { detected_alpha.or(alpha).filter(|b| *b <= source_bands) };
+            let mask = if tile.has_mask() { tile.read_mask(src_window, None)? } else { None };
+            // Extra untagged data bands are ignored, as in GDAL GTI.
+            let source_alpha = detected_alpha.or(alpha).filter(|b| *b <= source_bands);
             let generated_alpha = source_bands + 1 == count && wanted.contains(&count);
             let mut read_bands = wanted.iter().copied().filter(|b| *b <= source_bands).collect::<Vec<_>>();
             if let Some(alpha) = source_alpha {
@@ -559,11 +562,14 @@ impl RasterCatalog {
                 RasterData::F64(values) => values,
                 data => crate::pixel::with_data!(&data, values => values.iter().map(|&v|v as f64).collect::<Vec<f64>>()),
             };
-            for i in 0..sn {
-                let invalid = mask.as_ref().is_some_and(|m| m[i] == 0) || source_alpha.is_some_and(|b| values[b * sn + i] == 0.0);
-                for b in 0..read_bands.len() {
-                    let value = &mut values[b * sn + i];
-                    if invalid || source.nodata().is_some_and(|nd| crate::ops::is_nodata(*value, nd)) {
+            let mut invalid = filled_buffer(sn, false)?;
+            for (i, invalid) in invalid.iter_mut().enumerate() {
+                *invalid = mask.as_ref().is_some_and(|m| m[i] == 0) || source_alpha.is_some_and(|b| values[b * sn + i] == 0.0);
+            }
+            let nodata = source.nodata();
+            for band in values.chunks_mut(sn) {
+                for (value, &invalid) in band.iter_mut().zip(&invalid) {
+                    if invalid || nodata.is_some_and(|nd| crate::ops::is_nodata(*value, nd)) {
                         *value = f64::NAN;
                     }
                 }
@@ -609,7 +615,9 @@ impl RasterCatalog {
                 for (k, value) in warped.raster.band_view(b).as_slice().iter().copied().enumerate() {
                     let i = (cy0 + k / cw) * window.width + cx0 + k % cw;
                     if !value.is_nan() {
-                        out[b * n + i] = value;
+                        if !coverage_only {
+                            out[b * n + i] = value;
+                        }
                         if alpha != Some(*band) {
                             coverage[i] = 255;
                         }
@@ -620,7 +628,16 @@ impl RasterCatalog {
         // Dataset coverage is the union of every data band. A subset cannot
         // populate that cache; a later mask request renders the full band set.
         self.last_mask = (wanted.len() == count).then_some((window, coverage));
-        let mut data = RasterData::new_filled(self.header.raster.data_type, elements, 0.0);
+        // Coverage is a union across data bands, so nodata may require reading
+        // every band. Mask-only requests avoid the composite and typed output.
+        if coverage_only {
+            return Ok(self.header.clone());
+        }
+        let mut data = RasterData::new_filled(self.header.raster.data_type, 0, 0.0);
+        crate::pixel::with_data!(&mut data, v => {
+            v.try_reserve_exact(elements).map_err(|_| bad("cannot allocate catalog output"))?;
+            v.resize(elements, 0 as _);
+        });
         crate::pixel::with_data!(&mut data, v => {
             for (dst, band) in bands.iter().enumerate() {
                 let source = wanted.binary_search(band).unwrap();
@@ -992,5 +1009,21 @@ mod metadata_tests {
             let metadata = [("XSIZE".into(), "2".into()), ("YSIZE".into(), "2".into()), ("GEOTRANSFORM".into(), transform.into())];
             assert!(apply_metadata(&metadata, &mut Default::default()).is_err());
         }
+    }
+}
+
+/// Allocate fallibly so capacity overflow and allocation failure are reported.
+fn filled_buffer<T: Clone>(count: usize, value: T) -> Result<Vec<T>> {
+    let mut buffer = Vec::new();
+    buffer.try_reserve_exact(count).map_err(|_| bad("cannot allocate catalog window buffer"))?;
+    buffer.resize(count, value);
+    Ok(buffer)
+}
+
+#[cfg(test)]
+mod allocation_tests {
+    #[test]
+    fn oversized_window_buffer_returns_error() {
+        assert!(super::filled_buffer(usize::MAX, 0.0f64).is_err());
     }
 }

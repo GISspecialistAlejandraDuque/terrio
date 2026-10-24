@@ -87,6 +87,9 @@ def main():
         alpha.GetRasterBand(2).WriteArray(mask)
         alpha.GetRasterBand(2).SetColorInterpretation(gdal.GCI_AlphaBand)
         alpha = None
+        untagged = gdal.Translate(str(directory / "untagged.tif"), str(directory / "alpha.tif"))
+        untagged.GetRasterBand(2).SetColorInterpretation(gdal.GCI_Undefined)
+        untagged = None
         alpha_left = gdal.GetDriverByName("GTiff").Create(
             str(directory / "left-alpha.tif"), 128, 128, 2, gdal.GDT_Float32
         )
@@ -254,6 +257,7 @@ def main():
                 "right",
                 "nodata",
                 "masked",
+                "untagged",
                 "alpha",
                 "spectral",
                 "projected",
