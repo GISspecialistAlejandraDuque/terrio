@@ -13,7 +13,7 @@ use wbraster::raster::RasterData;
 use wbraster::{DataType, Raster, RasterConfig};
 use wbvector::{FieldValue, Layer};
 
-// Keep repeated tile-mask reads cheap without retaining arbitrarily large windows.
+// At most 1 MiB retained after a read; larger coverage results belong only to the caller.
 const MASK_CACHE_PIXELS: usize = 1024 * 1024;
 
 /// Options of a raster catalog. Missing output characteristics are inferred from the index
@@ -116,6 +116,56 @@ enum Index {
     File { path: String, layer: String, reader: Box<dyn IndexReader> },
     Memory { layer: Box<Layer>, tree: rstar::RTree<IndexCell> },
 }
+/// A named catalog source retained without materializing its pixels.
+/// Paths are opened only when selected and closed on cache eviction. Supplied raster handles
+/// retain their existing reader; encoded bytes are opened on first selection.
+pub struct CatalogInput(Input);
+enum Input {
+    Path(String),
+    Raster(LazyRaster),
+    Bytes(Vec<u8>, String),
+    Failed(String),
+}
+impl CatalogInput {
+    /// Defers opening a native path until spatial selection.
+    pub fn path(path: impl Into<String>) -> Self {
+        Self(Input::Path(path.into()))
+    }
+    /// Takes an existing raster handle, preserving its lazy window and overview reads.
+    pub fn raster(raster: LazyRaster) -> Self {
+        Self(Input::Raster(raster))
+    }
+    /// Defers decoding/opening an encoded file until spatial selection.
+    pub fn bytes(bytes: Vec<u8>, name: impl Into<String>) -> Self {
+        Self(Input::Bytes(bytes, name.into()))
+    }
+    fn open(&mut self) -> Result<LazyRaster> {
+        if let Input::Bytes(bytes, name) = &mut self.0 {
+            self.0 = match crate::memory::open_raster_lazy_bytes(std::mem::take(bytes), name) {
+                Ok(reader) => Input::Raster(reader),
+                Err(error) => Input::Failed(error.to_string()),
+            };
+        }
+        match &mut self.0 {
+            Input::Path(path) => {
+                if is_catalog(path) {
+                    return Err(Error::Unsupported("nested GTI source catalogs are not supported".into()));
+                }
+                LazyRaster::open(path)
+            }
+            Input::Raster(reader) => Ok(reader.shared()),
+            Input::Failed(message) => Err(bad(message)),
+            Input::Bytes(..) => unreachable!(),
+        }
+    }
+    fn inputs(&self) -> Result<Vec<String>> {
+        match &self.0 {
+            Input::Path(path) => Ok(vec![path.clone()]),
+            Input::Raster(reader) => reader.input_paths(),
+            Input::Bytes(..) | Input::Failed(_) => Ok(Vec::new()),
+        }
+    }
+}
 /// A catalog whose pixels are assembled on demand. Local catalogs use the index's on-disk
 /// spatial index. [`RasterCatalog::from_layer`] supports in-memory indexes and sources in WASM.
 pub struct RasterCatalog {
@@ -125,7 +175,7 @@ pub struct RasterCatalog {
     options: CatalogOptions,
     header: RasterDataset,
     cache: VecDeque<(String, LazyRaster, Option<usize>)>,
-    memory: Option<HashMap<String, LazyRaster>>,
+    memory: Option<HashMap<String, CatalogInput>>,
     stats: CatalogStats,
     last_mask: Option<(Window, Vec<u8>)>,
     input_paths: Option<Vec<String>>,
@@ -184,11 +234,15 @@ impl RasterCatalog {
     }
     /// Opens an index layer and named source rasters already held in memory, including WASM.
     pub fn from_layer(layer: Layer, sources: HashMap<String, RasterDataset>, options: CatalogOptions) -> Result<Self> {
-        Self::from_lazy_layer(layer, sources.into_iter().map(|(name, raster)| (name, LazyRaster::from(raster))).collect(), options)
+        Self::from_sources(layer, sources.into_iter().map(|(name, ds)| (name, CatalogInput::raster(ds.into()))).collect(), options)
     }
-    /// Opens supplied lazy sources without decoding their pixels. Source handles
-    /// remain alive until the catalog is dropped; only selected windows are read.
+    /// Opens supplied lazy sources without decoding their pixels.
     pub fn from_lazy_layer(layer: Layer, sources: HashMap<String, LazyRaster>, options: CatalogOptions) -> Result<Self> {
+        Self::from_sources(layer, sources.into_iter().map(|(name, raster)| (name, CatalogInput::raster(raster))).collect(), options)
+    }
+    /// Opens an in-memory index with named lazy readers, deferred paths or encoded files.
+    /// Sources outside the spatial selection are never opened or decoded.
+    pub fn from_sources(layer: Layer, sources: HashMap<String, CatalogInput>, options: CatalogOptions) -> Result<Self> {
         let bounds = extent(&layer);
         let schema = crate::stream::schema_of(&layer);
         let tree = rstar::RTree::bulk_load(
@@ -213,7 +267,7 @@ impl RasterCatalog {
         bounds: Option<(f64, f64, f64, f64)>,
         base: PathBuf,
         options: CatalogOptions,
-        memory: Option<HashMap<String, LazyRaster>>,
+        memory: Option<HashMap<String, CatalogInput>>,
     ) -> Result<Self> {
         if options.cache_size == Some(0) {
             return Err(Error::InvalidArgument("GTI cache_size must be positive".into()));
@@ -352,6 +406,8 @@ impl RasterCatalog {
         let sort = self.options.sort_field.as_ref().and_then(|name| self.schema.schema.field_index(name));
         let mut rows = Vec::new();
         let mut add = |feature: &wbvector::Feature| -> Result<()> {
+            // Raster footprints are half-open: touching edges and degenerate bounds
+            // contribute no output pixels, for both native and in-memory indexes.
             if let Some(bounds) = bounds
                 && !feature.geometry.as_ref().is_some_and(|g| {
                     g.bbox().is_some_and(|b| b.min_x < bounds.2 && b.max_x > bounds.0 && b.min_y < bounds.3 && b.max_y > bounds.1)
@@ -399,8 +455,12 @@ impl RasterCatalog {
             self.cache.push_back(entry);
             self.stats.cache_hits += 1;
         } else {
+            // Close the evicted native reader before opening its replacement.
+            if self.cache.len() >= self.options.cache_size.unwrap_or(32) {
+                self.cache.pop_front();
+            }
             let mut source = if let Some(memory) = &mut self.memory {
-                memory.get_mut(location).ok_or_else(|| bad(format!("source '{location}' is missing")))?.shared()
+                memory.get_mut(location).ok_or_else(|| bad(format!("source '{location}' is missing")))?.open()?
             } else {
                 let path = if Path::new(location).is_absolute() || location.contains("://") || location.starts_with("/vsi") {
                     location.into()
@@ -413,9 +473,6 @@ impl RasterCatalog {
                 LazyRaster::open(&path)?
             };
             let source_alpha = source.alpha_band();
-            if self.cache.len() >= self.options.cache_size.unwrap_or(32) {
-                self.cache.pop_front();
-            }
             self.cache.push_back((location.into(), source, source_alpha));
             self.stats.source_opens += 1;
             self.stats.peak_cached_sources = self.stats.peak_cached_sources.max(self.cache.len());
@@ -482,7 +539,10 @@ impl RasterCatalog {
             let footprint = if same_crs {
                 footprint
             } else {
-                crate::ops::Ct::new(&tile.crs(), &srs).and_then(|ct| crate::ops::transform_bounds(&ct, footprint, 21)).unwrap_or(bounds)
+                let ct = crate::ops::Ct::new(&tile.crs(), &srs)?;
+                // A footprint can cross the projection domain; retain the conservative
+                // full-window fallback only for bounds sampling, not invalid CRS pairs.
+                crate::ops::transform_bounds(&ct, footprint, 21).unwrap_or(bounds)
             };
             let cx0 = ((footprint.0 - origin.0) / gt[1]).floor().clamp(0.0, window.width as f64) as usize;
             let cy0 = ((footprint.3 - origin.1) / gt[5]).floor().clamp(0.0, window.height as f64) as usize;
@@ -570,9 +630,13 @@ impl RasterCatalog {
                 let mut selected = Vec::with_capacity(sn * wanted.len());
                 for band in &wanted {
                     if generated_alpha && *band == count {
-                        selected.extend(
-                            (0..sn).map(|i| if (0..read_bands.len()).any(|b| !values[b * sn + i].is_nan()) { 255.0 } else { f64::NAN }),
-                        );
+                        selected.extend((0..sn).map(|i| {
+                            if (0..read_bands.len()).any(|b| Some(b) != source_alpha && !values[b * sn + i].is_nan()) {
+                                255.0
+                            } else {
+                                f64::NAN
+                            }
+                        }));
                     } else {
                         let offset = read_bands.binary_search(band).unwrap() * sn;
                         selected.extend_from_slice(&values[offset..offset + sn]);
@@ -908,8 +972,10 @@ impl crate::cog::StreamedSource for CatalogSource {
         let mut paths = Vec::new();
         if let Some(sources) = &catalog.memory {
             for source in sources.values() {
-                paths.extend(source.checked_input_paths()?);
+                paths.extend(source.inputs()?);
             }
+            catalog.input_paths = Some(paths.clone());
+            return Ok(paths);
         }
         let field = catalog.schema.schema.field_index(catalog.options.location_field.as_deref().unwrap_or("location")).unwrap();
         let mut add = |layer: &Layer| {

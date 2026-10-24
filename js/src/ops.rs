@@ -1060,17 +1060,17 @@ pub fn open_catalog(index: JsValue, sources: JsValue, options: JsValue) -> Resul
     let mut rasters = std::collections::HashMap::new();
     for name in js_sys::Object::keys(&js_sys::Object::from(sources.clone())).iter() {
         let value = js_sys::Reflect::get(&sources, &name).map_err(|_| invalid("cannot read catalog source"))?;
-        let raster = if let Some(inner) = Dataset::lookup(&value) {
+        let input = if let Some(inner) = Dataset::lookup(&value) {
             match &mut *inner.borrow_mut() {
-                Inner::Raster(raster) => raster.shared(),
-                Inner::Vector(..) => return Err(invalid("catalog sources must be rasters")),
+                Inner::Raster(reader) => terrio::catalog::CatalogInput::raster(reader.shared()),
+                Inner::Vector(..) => return Err(invalid("expected a raster, got a vector dataset")),
             }
-        } else if let Some((bytes, filename)) = file_bytes(&value) {
-            terrio::memory::open_raster_lazy_bytes(bytes, &filename).map_err(js_err)?
+        } else if let Some((bytes, name)) = file_bytes(&value) {
+            terrio::catalog::CatalogInput::bytes(bytes, name)
         } else {
-            return Err(invalid("expected a Dataset or raster bytes"));
+            return Err(invalid("expected a raster: a Dataset, a Uint8Array or { bytes, filename }"));
         };
-        rasters.insert(name.as_string().ok_or_else(|| invalid("source name must be a string"))?, raster);
+        rasters.insert(name.as_string().ok_or_else(|| invalid("source name must be a string"))?, input);
     }
     let options = terrio::catalog::CatalogOptions {
         location_field: a.location_field,
@@ -1087,7 +1087,7 @@ pub fn open_catalog(index: JsValue, sources: JsValue, options: JsValue) -> Resul
         resampling: a.resampling.as_deref().map(Resampling::parse).transpose().map_err(js_err)?,
         ..Default::default()
     };
-    Ok(Dataset::from_lazy(terrio::catalog::RasterCatalog::from_lazy_layer(layers.remove(0), rasters, options).map_err(js_err)?.into_lazy()))
+    Ok(Dataset::from_lazy(terrio::catalog::RasterCatalog::from_sources(layers.remove(0), rasters, options).map_err(js_err)?.into_lazy()))
 }
 
 #[derive(Deserialize)]

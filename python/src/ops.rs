@@ -1377,7 +1377,7 @@ fn mosaic(
 fn open_catalog(
     py: Python<'_>,
     index: &Bound<'_, PyAny>,
-    sources: Option<&Bound<'_, pyo3::types::PyDict>>,
+    sources: Option<&Bound<'_, PyAny>>,
     layer: Option<String>,
     location_field: Option<String>,
     sort_field: Option<String>,
@@ -1418,17 +1418,18 @@ fn open_catalog(
         }
         let mut rasters = std::collections::HashMap::new();
         if let Some(sources) = sources {
-            for (name, value) in sources.iter() {
-                let raster = match raster_path(&value)? {
-                    Some(path) => py.detach(|| terrio::open_raster_lazy(&path)).py()?,
-                    None => {
-                        value.cast::<PyRaster>().map_err(|_| invalid("expected a path or a terrio.Raster"))?.borrow_mut().inner.shared()
-                    }
+            for item in sources.call_method0("items")?.try_iter()? {
+                let (name, value): (String, Bound<'_, PyAny>) = item?.extract()?;
+                let input = if let Some(path) = raster_path(&value)? {
+                    terrio::catalog::CatalogInput::path(path)
+                } else {
+                    let mut raster = value.cast::<PyRaster>()?.try_borrow_mut()?;
+                    terrio::catalog::CatalogInput::raster(raster.inner.shared())
                 };
-                rasters.insert(name.extract::<String>()?, raster);
+                rasters.insert(name, input);
             }
         }
-        terrio::catalog::RasterCatalog::from_lazy_layer(layers.remove(0), rasters, options).py()?
+        terrio::catalog::RasterCatalog::from_sources(layers.remove(0), rasters, options).py()?
     };
     Ok(PyRaster { inner: catalog.into_lazy() })
 }

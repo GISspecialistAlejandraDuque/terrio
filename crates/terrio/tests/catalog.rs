@@ -189,10 +189,13 @@ fn failed_source_inventory_never_truncates_the_destination() {
     let index_path = directory.path().join("tiles.gti.gpkg");
     terrio::write_vector(&[index()], index_path.to_str().unwrap(), &Default::default()).unwrap();
     let mut catalog = RasterCatalog::open(index_path.to_str().unwrap(), options()).unwrap().into_lazy();
+    let mut shared_catalog = catalog.shared();
     std::fs::rename(&index_path, index_path.with_extension("moved")).unwrap();
     let destination = directory.path().join("left.tif");
     let original = std::fs::read(&destination).unwrap();
     assert!(catalog.write(destination.to_str().unwrap(), &Default::default()).is_err());
+    assert_eq!(std::fs::read(&destination).unwrap(), original);
+    assert!(shared_catalog.write(destination.to_str().unwrap(), &Default::default()).is_err());
     assert_eq!(std::fs::read(&destination).unwrap(), original);
 
     // Once a complete inventory has been obtained, repeated exports reuse it.
@@ -327,6 +330,44 @@ fn optional_metadata_follows_gdal_first_tile_inspection() {
 }
 
 #[test]
+fn supplied_sources_defer_paths_and_encoded_files_until_selection() {
+    use terrio::catalog::CatalogInput;
+    let mut supplied = HashMap::from([
+        ("left.tif".into(), CatalogInput::raster(tile(0., 10.).into())),
+        ("right.tif".into(), CatalogInput::bytes(vec![0; 12], "invalid.tif")),
+        ("missing.tif".into(), CatalogInput::path("nonexistent-catalog-source.tif")),
+    ]);
+    let mut catalog = RasterCatalog::from_sources(index(), std::mem::take(&mut supplied), options()).unwrap();
+    assert_eq!(catalog.stats().source_opens, 0);
+    assert_eq!(catalog.read_window(Window::new(0, 0, 1, 1), &[]).unwrap().raster.data.to_f64_vec(), vec![10.]);
+    assert_eq!(catalog.stats().source_pixels, 1);
+    assert!(catalog.read_window(Window::new(5, 0, 1, 1), &[]).is_err());
+    assert_eq!(catalog.read_window(Window::new(0, 0, 1, 1), &[]).unwrap().raster.data.to_f64_vec(), vec![10.]);
+    assert_eq!(catalog.stats().peak_cached_sources, 1);
+}
+
+#[cfg(feature = "geotiff")]
+#[test]
+fn supplied_lazy_handle_preserves_overwrite_protection() {
+    use terrio::catalog::CatalogInput;
+    let directory = tempfile::tempdir().unwrap();
+    let destination = directory.path().join("left.tif");
+    terrio::write_raster_dataset(&tile(0., 10.), destination.to_str().unwrap(), &Default::default()).unwrap();
+    let mut reader = terrio::LazyRaster::open(destination.to_str().unwrap()).unwrap();
+    let mut footprint = index();
+    footprint.features.truncate(1);
+    let mut catalog = RasterCatalog::from_sources(
+        footprint,
+        HashMap::from([("left.tif".into(), CatalogInput::raster(reader.shared()))]),
+        CatalogOptions { extent: Some((0., 0., 4., 4.)), ..options() },
+    )
+    .unwrap()
+    .into_lazy();
+    catalog.write(destination.to_str().unwrap(), &Default::default()).unwrap();
+    assert_eq!(terrio::open_raster(destination.to_str().unwrap()).unwrap().raster.data.to_f64_vec(), vec![10.; 16]);
+}
+
+#[test]
 fn lazy_source_alias_overwrite_never_truncates_source() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("actual-source.tif");
@@ -337,4 +378,23 @@ fn lazy_source_alias_overwrite_never_truncates_source() {
     let catalog = RasterCatalog::from_lazy_layer(layer, sources, CatalogOptions { extent: Some((0., 0., 4., 4.)), ..options() }).unwrap();
     catalog.into_lazy().write(path.to_str().unwrap(), &Default::default()).unwrap();
     assert_eq!(terrio::open_raster(path.to_str().unwrap()).unwrap().raster.data.to_f64_vec(), vec![10.; 16]);
+}
+
+#[test]
+fn generated_alpha_ignores_source_alpha_when_all_data_is_nodata() {
+    let mut source = tile(0., -9999.);
+    source.raster.bands = 2;
+    source.raster.data = RasterData::F64([vec![-9999.; 16], vec![255.; 16]].concat());
+    source.raster.nodata = -9999.;
+    source.has_nodata = true;
+    source.driver = terrio::formats::RasterDriver::PNG;
+    let mut footprints = index();
+    footprints.features.truncate(1);
+    let mut catalog = RasterCatalog::from_layer(
+        footprints,
+        HashMap::from([("left.tif".into(), source)]),
+        CatalogOptions { bands: Some(3), alpha_band: Some(3), extent: Some((0., 0., 4., 4.)), ..options() },
+    )
+    .unwrap();
+    assert_eq!(catalog.read_window(Window::new(0, 0, 1, 1), &[3]).unwrap().raster.data.to_f64_vec(), vec![0.]);
 }

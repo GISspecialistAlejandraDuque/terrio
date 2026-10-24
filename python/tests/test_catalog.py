@@ -1,5 +1,8 @@
 """Catalog APIs on in-memory sources, including the WASM-compatible input model."""
 
+from collections import UserDict
+from types import MappingProxyType
+
 import numpy as np
 import pytest
 
@@ -99,7 +102,35 @@ def test_band_subsets_keep_order_duplicates_and_alpha():
         np.testing.assert_array_equal(output[0], [0, value, value, value])
         np.testing.assert_array_equal(output[1:], np.full((3, 4), value))
     np.testing.assert_array_equal(catalog.read_mask()[0], [0, 255, 255, 255])
+
     untagged = terrio.open_catalog(
         footprints, {"left": source}, tr=(1, 1), te=(0, 0, 4, 4), bands=5
     )
     np.testing.assert_array_equal(untagged.read(3), np.full((4, 4), 30))
+
+
+@pytest.mark.parametrize(
+    "mapping",
+    [
+        dict,
+        pytest.param(MappingProxyType, id="mapping-proxy"),
+        pytest.param(UserDict, id="user-dict"),
+    ],
+)
+def test_supplied_lazy_sources_and_paths_are_deferred(tmp_path, mapping):
+    path = tmp_path / "source.tif"
+    source = terrio.Raster.from_array(
+        np.full((4, 4), 10, dtype="uint8"), (0, 1, 0, 4, 0, -1), crs="EPSG:4326"
+    )
+    source.write(str(path))
+    lazy = terrio.open_raster(str(path))
+    for left in [lazy, path]:
+        catalog = terrio.open_catalog(
+            index(),
+            mapping({"left": left, "right": tmp_path / "missing.tif"}),
+            tr=(1, 1),
+            te=(0, 0, 6, 4),
+            bands=1,
+        )
+        np.testing.assert_array_equal(catalog.read(1, window=(0, 0, 1, 1)), [[10]])
+    np.testing.assert_array_equal(lazy.read(1, window=(0, 0, 1, 1)), [[10]])

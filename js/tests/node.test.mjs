@@ -1209,3 +1209,20 @@ test("pansharpen weights, selected bands and unequal resolutions", () => {
   assert.throws(() => terrio.pansharpen(pan, spectral, { weights: [1] }), /weight/);
   pan.free(); spectral.free(); out.free(); selected.free();
 });
+
+
+test("openCatalog: defers unused encoded sources and preserves supplied lazy datasets", () => {
+  const index = { type: "FeatureCollection", features: [["left", 0], ["right", 2]].map(([location, x]) => ({
+    type: "Feature", properties: { location }, geometry: { type: "Polygon", coordinates: [[[x, 0], [x + 4, 0], [x + 4, 4], [x, 4], [x, 0]]] },
+  })) };
+  const source = terrio.rasterFromArray(new Uint8Array(16).fill(10), 4, 4, [0, 1, 0, 4, 0, -1], "EPSG:4326");
+  const bytes = source.toBytes("source.tif");
+  const lazy = terrio.open(bytes, "source.tif");
+  for (const left of [lazy, { bytes, filename: "source.tif" }]) {
+    const catalog = terrio.openCatalog(index, { left, right: { bytes: new Uint8Array(12), filename: "invalid.tif" } }, { tr: [1, 1], te: [0, 0, 6, 4], bands: 1 });
+    assert.deepEqual([...catalog.readBand(1, [0, 0, 1, 1])], [10]);
+    catalog.free();
+  }
+  assert.deepEqual([...lazy.readBand(1, [0, 0, 1, 1])], [10]);
+  lazy.free(); source.free();
+});
