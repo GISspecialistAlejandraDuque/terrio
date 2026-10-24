@@ -24,6 +24,7 @@ use crate::geotiff::{GeoTags, PatchedReader, read_geo_tags_from};
 use crate::vfs::{self, Location};
 use crate::{Error, RasterDataset, Result};
 use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::sync::{Arc, Mutex};
 use tiff::decoder::{ChunkType, Decoder, DecodingResult, Limits};
 use tiff::tags::Tag;
 use wbraster::DataType;
@@ -96,14 +97,22 @@ impl std::fmt::Debug for LazyRaster {
 
 enum Inner {
     Tiff(Box<TiffRaster>),
-    Memory(RasterDataset),
+    Memory(Arc<RasterDataset>),
     /// A raster another driver reads by window: its header (without pixels) and reader.
-    Source(RasterDataset, Box<dyn WindowSource>),
+    Source(Arc<RasterDataset>, Box<dyn WindowSource>),
 }
 
 /// A raster read by window, at full resolution or from an overview, by a driver other than the
 /// GeoTIFF one (STAC mosaics, Zarr pyramids).
 pub(crate) trait WindowSource: Send + Sync {
+    /// A second handle to an already shared source.
+    fn shared_clone(&self) -> Option<Box<dyn WindowSource>> {
+        None
+    }
+    /// The explicitly tagged source alpha band.
+    fn alpha_band(&self) -> Option<usize> {
+        None
+    }
     /// The sizes `(width, height)` of the overviews, largest first.
     fn overviews(&self) -> Vec<(usize, usize)>;
     /// The block size `(width, height)` reads are best aligned to, when the format has one.
@@ -114,15 +123,11 @@ pub(crate) trait WindowSource: Send + Sync {
     fn has_mask(&self) -> bool {
         false
     }
-    /// Explicit alpha-band identity, when a wrapper retains one.
-    fn alpha_band(&self) -> Option<usize> {
-        None
-    }
     /// Reads a mask window: 255 for valid pixels, zero for invalid pixels.
     fn read_mask(&mut self, _level: usize, _window: Window) -> Result<Option<Vec<u8>>> {
         Ok(None)
     }
-    /// Files a wrapper reads, for overwrite protection when it is not streamed.
+    /// Files a non-streamed source reads; unknown inventories must fail before an export.
     fn input_paths(&self) -> Result<Vec<String>> {
         Err(Error::Unsupported("source inventory unavailable".into()))
     }
@@ -152,23 +157,24 @@ pub(crate) trait StreamedSource: Sync {
 
 #[derive(Clone)]
 struct SharedRaster {
-    inner: std::sync::Arc<std::sync::Mutex<LazyRaster>>,
+    reader: Arc<Mutex<LazyRaster>>,
     overviews: Vec<(usize, usize)>,
     block: Option<(usize, usize)>,
-    mask: bool,
     alpha: Option<usize>,
-    streamed: bool,
+    mask: bool,
 }
 impl SharedRaster {
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, LazyRaster>> {
-        self.inner.lock().map_err(|_| Error::InvalidData("shared raster lock poisoned".into()))
+        self.reader.lock().map_err(|_| Error::InvalidData("shared raster lock poisoned".into()))
     }
 }
 impl WindowSource for SharedRaster {
-    fn input_paths(&self) -> Result<Vec<String>> {
-        self.lock()?.checked_input_paths()
+    fn shared_clone(&self) -> Option<Box<dyn WindowSource>> {
+        Some(Box::new(self.clone()))
     }
-
+    fn alpha_band(&self) -> Option<usize> {
+        self.alpha
+    }
     fn overviews(&self) -> Vec<(usize, usize)> {
         self.overviews.clone()
     }
@@ -178,17 +184,14 @@ impl WindowSource for SharedRaster {
     fn has_mask(&self) -> bool {
         self.mask
     }
-    fn alpha_band(&self) -> Option<usize> {
-        self.alpha
-    }
     fn read_mask(&mut self, level: usize, window: Window) -> Result<Option<Vec<u8>>> {
         self.lock()?.read_mask(window, level.checked_sub(1))
     }
-    fn read(&mut self, level: usize, window: Window, bands: &[usize]) -> Result<RasterData> {
-        Ok(self.lock()?.read_window(window, &WindowOptions { bands: bands.to_vec(), overview: level.checked_sub(1) })?.raster.data)
-    }
     fn streamed(&self) -> Option<&dyn StreamedSource> {
-        self.streamed.then_some(self)
+        Some(self)
+    }
+    fn read(&mut self, level: usize, window: Window, bands: &[usize]) -> Result<RasterData> {
+        Ok(self.lock()?.read_window(window, &WindowOptions { bands: bands.into(), overview: level.checked_sub(1) })?.raster.data)
     }
 }
 impl StreamedSource for SharedRaster {
@@ -196,11 +199,10 @@ impl StreamedSource for SharedRaster {
         self.checked_inputs().unwrap_or_default()
     }
     fn checked_inputs(&self) -> Result<Vec<String>> {
-        self.lock()?.checked_input_paths()
+        self.lock()?.input_paths()
     }
-
     fn read_rows(&self, window: Window, bands: &[usize]) -> Result<RasterData> {
-        Ok(self.lock()?.read_window(window, &WindowOptions { bands: bands.to_vec(), overview: None })?.raster.data)
+        Ok(self.lock()?.read_window(window, &WindowOptions { bands: bands.into(), overview: None })?.raster.data)
     }
 }
 
@@ -210,35 +212,52 @@ pub fn open_raster_lazy(path: &str) -> Result<LazyRaster> {
 }
 
 impl LazyRaster {
-    pub(crate) fn checked_input_paths(&self) -> Result<Vec<String>> {
-        match &self.inner {
-            Inner::Tiff(t) => Ok(t.file.iter().map(|p| p.to_string_lossy().into_owned()).collect()),
-            Inner::Source(_, source) => match source.streamed() {
-                Some(source) => source.checked_inputs(),
-                None => source.input_paths(),
-            },
-            Inner::Memory(_) => Ok(Vec::new()),
-        }
-    }
-
-    /// Shares this reader without decoding pixels. Both handles retain its storage
-    /// and serialize window access; metadata, masks and overviews remain available.
+    /// Shares this raster without decoding pixels or copying loaded pixel buffers.
+    /// Lazy handles serialize access to their existing reader and retain window/overview reads.
+    /// Handles are read-only aliases: replacing one handle does not replace the others. Loaded
+    /// pixels are immutable shared buffers; changes to backing files are not snapshotted.
     pub fn shared(&mut self) -> Self {
-        let header = self.header();
+        if let Inner::Memory(ds) = &self.inner {
+            let inner = Inner::Memory(ds.clone());
+            let sidecar_mask = self.sidecar_mask.as_mut().map(|m| Box::new(m.shared()));
+            return Self { inner, sidecar_mask };
+        }
+        if let Inner::Source(header, source) = &self.inner
+            && let Some(source) = source.shared_clone()
+        {
+            let inner = Inner::Source(header.clone(), source);
+            let sidecar_mask = self.sidecar_mask.as_mut().map(|m| Box::new(m.shared()));
+            return Self { inner, sidecar_mask };
+        }
+        let mut header = self.header();
+        if let Inner::Tiff(t) = &self.inner {
+            header.raster.metadata = t.tags.metadata.clone();
+            header.raster.crs = t.tags.crs_info();
+        }
         let overviews = self.overviews();
         let block = self.block_size();
-        let mask = self.has_mask();
         let alpha = self.alpha_band();
-        let streamed = match &self.inner {
-            Inner::Tiff(t) => t.file.is_some(),
-            Inner::Source(_, source) => source.streamed().is_some(),
-            Inner::Memory(_) => false,
+        let mask = self.has_mask();
+        let replacement = Self::from(header.clone());
+        let original = std::mem::replace(self, replacement);
+        let shared = SharedRaster { reader: Arc::new(Mutex::new(original)), overviews, block, alpha, mask };
+        *self = Self::from_source(header.clone(), Box::new(shared.clone()));
+        Self::from_source(header, Box::new(shared))
+    }
+
+    pub(crate) fn input_paths(&self) -> Result<Vec<String>> {
+        let mut paths = match &self.inner {
+            Inner::Tiff(t) => t.file.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+            Inner::Memory(_) => Vec::new(),
+            Inner::Source(_, source) => match source.streamed() {
+                Some(source) => source.checked_inputs()?,
+                None => source.input_paths()?,
+            },
         };
-        let placeholder = Self::from(header.clone());
-        let original = std::mem::replace(self, placeholder);
-        let source = SharedRaster { inner: std::sync::Arc::new(std::sync::Mutex::new(original)), overviews, block, mask, alpha, streamed };
-        *self = Self::from_source(header.clone(), Box::new(source.clone()));
-        Self::from_source(header, Box::new(source))
+        if let Some(mask) = &self.sidecar_mask {
+            paths.extend(mask.input_paths()?);
+        }
+        Ok(paths)
     }
 
     /// Opens a raster: a path, URL, `s3://`, `gs://` or `az://` object, or zip archive member.
@@ -292,7 +311,7 @@ impl LazyRaster {
         }
         match Self::open_tiff(path)? {
             Some(r) => Ok(r),
-            None => crate::open_raster(path).map(|ds| Self { inner: Inner::Memory(ds), sidecar_mask: None }),
+            None => crate::open_raster(path).map(|ds| Self { inner: Inner::Memory(Arc::new(ds)), sidecar_mask: None }),
         }
     }
 
@@ -412,10 +431,10 @@ impl LazyRaster {
                 }
                 t.decoder.get_tag_u16_vec(Tag::ExtraSamples).ok()?.last().is_some_and(|sample| matches!(*sample, 1 | 2)).then_some(t.bands)
             }
-            Inner::Source(_, source) if source.alpha_band().is_some() => source.alpha_band(),
             Inner::Memory(ds) | Inner::Source(ds, _) if ds.driver == RasterDriver::PNG && matches!(ds.raster.bands, 2 | 4) => {
                 Some(ds.raster.bands)
             }
+            Inner::Source(_, s) => s.alpha_band(),
             _ => None,
         }
     }
@@ -728,7 +747,7 @@ impl LazyRaster {
 
     /// A raster read by window by `source`, described by `header` (a dataset without pixels).
     pub(crate) fn from_source(header: RasterDataset, source: Box<dyn WindowSource>) -> Self {
-        Self { inner: Inner::Source(header, source), sidecar_mask: None }
+        Self { inner: Inner::Source(Arc::new(header), source), sidecar_mask: None }
     }
 
     /// Wraps an archive of image tiles (PMTiles, MBTiles), its zoom levels as overviews.
@@ -741,7 +760,7 @@ impl LazyRaster {
 impl From<RasterDataset> for LazyRaster {
     /// Wraps a raster in memory, so that it is read by window like a lazy one.
     fn from(ds: RasterDataset) -> Self {
-        Self { inner: Inner::Memory(ds), sidecar_mask: None }
+        Self { inner: Inner::Memory(Arc::new(ds)), sidecar_mask: None }
     }
 }
 
@@ -1151,6 +1170,57 @@ mod tests {
         assert_eq!(header.raster.metadata, dataset.raster.metadata);
         assert_eq!(header.raster.cols, 4);
         assert_eq!(lazy.dataset().unwrap().raster.data.len(), 24);
+    }
+
+    #[test]
+    fn shares_loaded_buffers_and_lazy_window_readers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct CountingSource(Arc<AtomicUsize>);
+        impl WindowSource for CountingSource {
+            fn overviews(&self) -> Vec<(usize, usize)> {
+                vec![(512, 512)]
+            }
+            fn block_size(&self) -> Option<(usize, usize)> {
+                Some((16, 16))
+            }
+            fn alpha_band(&self) -> Option<usize> {
+                Some(2)
+            }
+            fn has_mask(&self) -> bool {
+                true
+            }
+            fn read_mask(&mut self, _: usize, window: Window) -> Result<Option<Vec<u8>>> {
+                Ok(Some(vec![255; window.width * window.height]))
+            }
+            fn read(&mut self, level: usize, window: Window, bands: &[usize]) -> Result<RasterData> {
+                assert!(window.width <= 4 && window.height <= 4, "a shared source must stay windowed");
+                let n = window.width * window.height * bands.len();
+                self.0.fetch_add(n, Ordering::Relaxed);
+                Ok(RasterData::U8(vec![10 + level as u8; n]))
+            }
+        }
+        let cfg = wbraster::RasterConfig { cols: 1024, rows: 1024, bands: 2, data_type: DataType::U8, ..Default::default() };
+        let ds = RasterDataset::new(wbraster::Raster::from_data_native(cfg, RasterData::U8(vec![7; 2 * 1024 * 1024])).unwrap(), false);
+        let mut memory = LazyRaster::from(ds);
+        let loaded = memory.shared();
+        assert!(std::ptr::eq(memory.dataset().unwrap(), loaded.dataset().unwrap()));
+        assert!(!memory.is_lazy() && !loaded.is_lazy());
+        let pixels = Arc::new(AtomicUsize::new(0));
+        let mut source = LazyRaster::from_source(memory.header(), Box::new(CountingSource(pixels.clone())));
+        let mut shared = source.shared();
+        let mut again = source.shared();
+        assert_eq!(pixels.load(Ordering::Relaxed), 0);
+        assert!(source.is_lazy() && shared.is_lazy());
+        assert_eq!(shared.overviews(), vec![(512, 512)]);
+        assert_eq!(shared.block_size(), Some((16, 16)));
+        assert_eq!(shared.alpha_band(), Some(2));
+        let window = Window::new(2, 3, 2, 2);
+        assert_eq!(shared.read_mask(window, Some(0)).unwrap(), Some(vec![255; 4]));
+        for reader in [&mut source, &mut shared, &mut again] {
+            let read = reader.read_window(window, &WindowOptions { bands: vec![2, 1, 2], overview: Some(0) }).unwrap();
+            assert_eq!(read.raster.data.to_f64_vec(), vec![11.; 12]);
+        }
+        assert_eq!(pixels.load(Ordering::Relaxed), 36);
     }
 
     #[test]

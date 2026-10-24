@@ -87,7 +87,9 @@ def main():
         alpha.GetRasterBand(2).WriteArray(mask)
         alpha.GetRasterBand(2).SetColorInterpretation(gdal.GCI_AlphaBand)
         alpha = None
-        untagged = gdal.Translate(str(directory / "untagged.tif"), str(directory / "alpha.tif"))
+        untagged = gdal.Translate(
+            str(directory / "untagged.tif"), str(directory / "alpha.tif")
+        )
         untagged.GetRasterBand(2).SetColorInterpretation(gdal.GCI_Undefined)
         untagged = None
         alpha_left = gdal.GetDriverByName("GTiff").Create(
@@ -470,6 +472,85 @@ def main():
                     proc.stderr if proc.returncode else ""
                 ) or f"unexpected I/O counters: {stats}"
             results.append(result)
+            # Supplied Python readers must remain lazy too: constructing a catalog must not
+            # transfer the large tile's pixels, and an 8x8 query must stay a range read.
+            import terrio as bindings
+
+            large_path = directory / "large.tif"
+            large = gdal.Translate(
+                str(large_path),
+                source,
+                srcWin=[100, 100, 870, 398],
+                outputType=gdal.GDT_Float32,
+                creationOptions=[
+                    "TILED=YES",
+                    "BLOCKXSIZE=64",
+                    "BLOCKYSIZE=64",
+                    "COMPRESS=NONE",
+                ],
+            )
+            lgt = large.GetGeoTransform()
+            large_bounds = (lgt[0], lgt[3] - 398, lgt[0] + 870, lgt[3])
+            x0, y0, x1, y1 = large_bounds
+            supplied_index = directory / "supplied.gpkg"
+            index_ds = ogr.GetDriverByName("GPKG").CreateDataSource(str(supplied_index))
+            index_layer = index_ds.CreateLayer("tiles", srs, ogr.wkbPolygon)
+            index_layer.CreateField(ogr.FieldDefn("location", ogr.OFTString))
+            feature = ogr.Feature(index_layer.GetLayerDefn())
+            feature.SetField("location", "large")
+            feature.SetGeometry(
+                ogr.CreateGeometryFromWkt(
+                    f"POLYGON (({x0} {y0},{x1} {y0},{x1} {y1},{x0} {y1},{x0} {y0}))"
+                )
+            )
+            index_layer.CreateFeature(feature)
+            feature = index_layer = index_ds = None
+            reference = str(directory / "supplied-reference.tif")
+            gdal.Translate(reference, large, srcWin=[400, 200, 8, 8])
+            large = None
+            url = f"http://127.0.0.1:{server.server_port}/large.tif"
+            lazy = bindings.open_raster(url, lazy=True)
+            for mode, supplied in [("lazy reader", lazy), ("deferred path", url)]:
+                RangeHandler.bytes_sent = 0
+                RangeHandler.paths = set()
+                try:
+                    catalog = bindings.open_catalog(
+                        str(supplied_index),
+                        {"large": supplied, "unused": "nonexistent.tif"},
+                        tr=(1, 1),
+                        te=large_bounds,
+                        bands=1,
+                        ot="Float32",
+                        nodata=-9999,
+                        cache_size=1,
+                    )
+                    constructor_bytes = RangeHandler.bytes_sent
+                    values = catalog.read(1, window=(400, 200, 8, 8))
+                    read_bytes = RangeHandler.bytes_sent
+                    actual = str(directory / f"supplied-{mode.replace(' ', '-')}.tif")
+                    bindings.Raster.from_array(
+                        values,
+                        (lgt[0] + 400, 1, 0, lgt[3] - 200, 0, -1),
+                        crs=srs.ExportToWkt(),
+                        nodata=-9999,
+                    ).write(actual)
+                    result = compare(reference, actual, 0)
+                    result.update(
+                        constructor_http_bytes=constructor_bytes,
+                        window_http_bytes=read_bytes,
+                        full_tile_bytes=large_path.stat().st_size,
+                    )
+                    if (
+                        result.get("valid_mismatch")
+                        or constructor_bytes
+                        or read_bytes >= large_path.stat().st_size // 2
+                        or len(RangeHandler.paths) > 1
+                    ):
+                        result["error"] = f"supplied source was not lazy: {result}"
+                except Exception as error:
+                    result = {"error": str(error)}
+                result["name"] = f"GTI supplied {mode} HTTP window I/O"
+                results.append(result)
         finally:
             server.shutdown()
             server.server_close()

@@ -1074,7 +1074,7 @@ class RpcTransformer:
 def cli_main(args: Sequence[str], terrio: Sequence[str] | None = None) -> int: ...
 def open_catalog(
     index: _VectorSource | str,
-    sources: dict[str, _RasterSource] | None = None,
+    sources: Mapping[str, _RasterSource] | None = None,
     *,
     layer: str | None = None,
     location_field: str | None = None,

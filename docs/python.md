@@ -302,6 +302,11 @@ catalog = terrio.open_catalog(index_layer, {"left.tif": left, "right.tif": right
                              tr=(30, 30), sort_field="priority", cache_size=16)
 ```
 
+The source mapping accepts `Raster` objects and paths, including `PathLike` values. Paths
+are opened only when selected and close on cache eviction. Supplied lazy rasters retain their
+window/overview reads; loaded buffers and existing readers remain shared with the caller.
+Replacing or deleting the original Python object does not replace the catalog's handle.
+
 Options include `layer`, `location_field`, `sort_field`, `sort_descending`, `tr`, `te`, `srs`,
 `bands`, `ot`, `nodata`, `alpha_band`, `cache_size` and `resampling`. Missing grid characteristics
 come from index metadata or one tile header. Dataset masks, source nodata and zero alpha are

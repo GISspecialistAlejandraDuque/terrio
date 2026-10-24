@@ -179,6 +179,9 @@ const pixels = catalog.readBand(1, [100, 200, 256, 256]);
 ```
 
 The index uses an in-memory R-tree in WASM; only selected sources enter the bounded cache.
+Supplied lazy datasets retain window/overview reads, and encoded files are opened only when
+selected. Existing dataset buffers/readers remain shared with the caller; freeing the original
+Dataset does not close the catalog's handle.
 Locations are keys in the supplied source map; WASM does not open filesystem paths or URLs.
 Options are `locationField`, `sortField`, `sortDescending`, `tr`, `te`, `srs`, `bands`, `ot`,
 `nodata`, `alphaBand`, `cacheSize` and `resampling`. Source masks/nodata and zero alpha are

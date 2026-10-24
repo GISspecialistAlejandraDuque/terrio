@@ -123,6 +123,10 @@ these cases on the real USGS terrain, with holes and explicit validity masks:
 python scripts/compare_dem_calc_with_gdal.py ../terrio-data --only fill-nodata
 ```
 
+The catalog suite also supplies a lazy HTTP reader and a deferred URL through Python's
+source mapping. Catalog construction transfers zero additional tile bytes; an 8x8 real-DEM
+query must match GDAL exactly and transfer less than half of the 1.6 MB tile.
+
 ### Pansharpening against GDAL
 
 The fetch script downloads Landsat 8 B8/B4/B3/B2 real image pairs from the public
