@@ -642,9 +642,9 @@ fn index_header(path: &str, wanted: Option<&str>) -> Result<IndexHeader> {
     let extension = crate::formats::extension(path).unwrap_or_default();
     #[cfg(feature = "sqlite")]
     if extension == "gpkg" {
-        use crate::drivers::sqlite::{Db, Value};
+        use crate::drivers::sqlite::Value;
         use crate::drivers::vector::gpkg_read;
-        let db = Db::open(Path::new(path))?;
+        let db = crate::drivers::sqlite_edit::open_consistent(Path::new(path))?;
         let (contents, _) = gpkg_read::contents(&db)?;
         let metadata_table = db.table("gpkg_metadata").ok();
         let references = db.table("gpkg_metadata_reference").ok();
@@ -738,6 +738,29 @@ fn apply_metadata(metadata: &[(String, String)], options: &mut CatalogOptions) -
     if options.sort_descending.is_none() {
         options.sort_descending = get("SORT_FIELD_ASC").map(|v| matches!(v.to_ascii_lowercase().as_str(), "no" | "false" | "0"));
     }
+    match (num("XSIZE")?, num("YSIZE")?, get("GEOTRANSFORM")) {
+        (None, None, None) => {}
+        (Some(width), Some(height), Some(transform)) => {
+            if [width, height].iter().any(|size| !size.is_finite() || *size <= 0.0 || size.fract() != 0.0 || *size >= usize::MAX as f64) {
+                return Err(bad("XSIZE/YSIZE must be positive integer dimensions"));
+            }
+            let coefficients = transform
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.parse::<f64>().map_err(|_| bad("invalid GEOTRANSFORM")))
+                .collect::<Result<Vec<_>>>()?;
+            let gt: [f64; 6] = coefficients.try_into().map_err(|_| bad("GEOTRANSFORM requires six coefficients"))?;
+            if gt.iter().any(|value| !value.is_finite()) {
+                return Err(bad("GEOTRANSFORM coefficients must be finite"));
+            }
+            if gt[2] != 0.0 || gt[4] != 0.0 || gt[1] <= 0.0 || gt[5] >= 0.0 {
+                return Err(Error::Unsupported("GTI output GEOTRANSFORM must be north-up without rotation".into()));
+            }
+            options.resolution.get_or_insert((gt[1], -gt[5]));
+            options.extent.get_or_insert((gt[0], gt[3] + gt[5] * height, gt[0] + gt[1] * width, gt[3]));
+        }
+        _ => return Err(bad("XSIZE, YSIZE and GEOTRANSFORM must be supplied together")),
+    }
     if options.resolution.is_none()
         && let (Some(x), Some(y)) = (num("RESX")?, num("RESY")?)
     {
@@ -773,7 +796,7 @@ fn apply_metadata(metadata: &[(String, String)], options: &mut CatalogOptions) -
     Ok(())
 }
 fn apply_xml(root: &crate::drivers::vector::xml::Element, options: &mut CatalogOptions) -> Result<()> {
-    for unsupported in ["SQL", "SpatialSQL", "Filter", "Overview", "GeoTransform"] {
+    for unsupported in ["SQL", "SpatialSQL", "Filter", "Overview"] {
         if root.child(unsupported).is_some() {
             return Err(Error::Unsupported(format!("GTI XML {unsupported} is not supported")));
         }
@@ -788,6 +811,9 @@ fn apply_xml(root: &crate::drivers::vector::xml::Element, options: &mut CatalogO
         ("SRS", "SRS"),
         ("ResX", "RESX"),
         ("ResY", "RESY"),
+        ("GeoTransform", "GEOTRANSFORM"),
+        ("XSize", "XSIZE"),
+        ("YSize", "YSIZE"),
         ("MinX", "MINX"),
         ("MinY", "MINY"),
         ("MaxX", "MAXX"),
@@ -916,5 +942,49 @@ impl WindowSource for MemoryTile {
             return Err(bad("in-memory catalog tiles have no overviews"));
         }
         Ok(crate::cog::cut(&self.datasets[&self.name].raster, window, bands))
+    }
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+    #[test]
+    fn size_metadata_and_xml_define_resolution() {
+        let metadata = [
+            ("XSIZE", "12"),
+            ("YSIZE", "6"),
+            ("GEOTRANSFORM", "10,2,0,32,0,-2"),
+            ("MINX", "10"),
+            ("MINY", "20"),
+            ("MAXX", "34"),
+            ("MAXY", "32"),
+        ]
+        .map(|(key, value)| (key.into(), value.into()));
+        let mut options = CatalogOptions::default();
+        apply_metadata(&metadata, &mut options).unwrap();
+        assert_eq!(options.resolution, Some((2., 2.)));
+        let xml = crate::drivers::vector::xml::parse("<GDALTileIndexDataset><XSize>12</XSize><YSize>6</YSize><GeoTransform>10,2,0,32,0,-2</GeoTransform><MinX>10</MinX><MinY>20</MinY><MaxX>34</MaxX><MaxY>32</MaxY></GDALTileIndexDataset>").unwrap();
+        let mut options = CatalogOptions::default();
+        apply_xml(&xml, &mut options).unwrap();
+        assert_eq!(options.resolution, Some((2., 2.)));
+        let mut explicit = CatalogOptions { resolution: Some((3., 3.)), ..Default::default() };
+        apply_metadata(&metadata, &mut explicit).unwrap();
+        assert_eq!(explicit.resolution, Some((3., 3.)));
+    }
+    #[test]
+    fn size_metadata_requires_a_valid_complete_grid() {
+        for (width, height) in [("0", "2"), ("2.5", "2"), ("NaN", "2"), ("2", "-1")] {
+            let metadata =
+                [("XSIZE".into(), width.into()), ("YSIZE".into(), height.into()), ("GEOTRANSFORM".into(), "0,1,0,4,0,-1".into())];
+            let mut options = CatalogOptions { extent: Some((0., 0., 4., 4.)), ..Default::default() };
+            assert!(apply_metadata(&metadata, &mut options).is_err());
+        }
+        let metadata = [("XSIZE".into(), "2".into()), ("YSIZE".into(), "2".into())];
+        assert!(apply_metadata(&metadata, &mut Default::default()).is_err());
+        assert!(apply_metadata(&metadata[..1], &mut Default::default()).is_err());
+        for transform in ["0,1,0.1,4,0,-1", "0,1,0,4,0", "NaN,1,0,4,0,-1"] {
+            let metadata = [("XSIZE".into(), "2".into()), ("YSIZE".into(), "2".into()), ("GEOTRANSFORM".into(), transform.into())];
+            assert!(apply_metadata(&metadata, &mut Default::default()).is_err());
+        }
     }
 }

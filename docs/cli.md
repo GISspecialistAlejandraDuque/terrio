@@ -647,7 +647,10 @@ Generating output alpha needs validity from all source data bands; a separate da
 likewise computes coverage from every data band. Whole mosaics write in strips.
 
 The supported GTI subset includes `IndexDataset`, `IndexLayer`, `LocationField`, sort order,
-SRS, resolution, extent, band count/type/nodata and alpha color interpretation. Tile sources
+SRS, resolution, extent, band count/type/nodata and alpha color interpretation.
+The `XSIZE`/`YSIZE`/`GEOTRANSFORM` metadata triplet (XML `XSize`/`YSize`/`GeoTransform`)
+also defines a north-up grid. Sizes must be positive integers; incomplete triplets and rotated
+output transforms are rejected. Tile sources
 must provide affine geotransforms; pre-warp GCP/RPC or swath sources, or wrap them in warped
 VRTs. Index and output CRSs must match; use `warp` on the catalog to change the output CRS.
 Mosaic bands share one data type and nodata value; per-band nodata/type differences, nested GTI catalogs,

@@ -118,6 +118,7 @@ def main():
             many=False,
             spectral=False,
             declare_alpha=True,
+            grid_size=False,
         ):
             ds = ogr.GetDriverByName(driver).CreateDataSource(str(path))
             layer = ds.CreateLayer("tiles", srs, ogr.wkbPolygon)
@@ -135,6 +136,10 @@ def main():
                 "MAXX": str(bounds[2]),
                 "MAXY": str(bounds[3]),
             }
+            if grid_size:
+                metadata.pop("RESX")
+                metadata.pop("RESY")
+                metadata.update(XSIZE="96", YSIZE="64", GEOTRANSFORM=f"{bounds[0]},2,0,{bounds[3]},0,-2")
             if alpha and declare_alpha:
                 metadata["COLOR_INTERPRETATION"] = "gray,alpha"
             layer.SetMetadata(metadata)
@@ -240,6 +245,9 @@ def main():
                         index,
                         bands=[band],
                     )
+            size_index = directory / f"size-{extension}.gti.{extension}"
+            write_index(size_index, driver, "right.tif", grid_size=True)
+            check(f"GTI {extension} XSIZE/YSIZE metadata", size_index)
             # Terrio-written indexes cross-read by GDAL. Explicit GTI XML supplies mosaic
             # characteristics, since a generic vector conversion does not retain layer metadata.
             geojson = directory / "tiles.geojson"
@@ -259,6 +267,15 @@ def main():
                 "</GDALTileIndexDataset>"
             )
             check(f"GTI {extension} Terrio index", descriptor)
+            size_descriptor = directory / f"terrio-size-{extension}.gti"
+            size_descriptor.write_text(
+                descriptor.read_text().replace(
+                    "<ResX>1</ResX><ResY>1</ResY>",
+                    f"<XSize>96</XSize><YSize>64</YSize><GeoTransform>{bounds[0]},2,0,{bounds[3]},0,-2</GeoTransform><MinX>{bounds[0]}</MinX>"
+                    f"<MinY>{bounds[1]}</MinY><MaxX>{bounds[2]}</MaxX><MaxY>{bounds[3]}</MaxY>",
+                )
+            )
+            check(f"GTI {extension} XML XSize/YSize", size_descriptor)
 
         class RangeHandler(http.server.SimpleHTTPRequestHandler):
             bytes_sent = 0
