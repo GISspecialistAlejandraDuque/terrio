@@ -94,3 +94,15 @@ fn extra_alpha_band_masks_overlapping_tiles() {
     assert!(lazy.has_mask());
     assert_eq!(&lazy.read_mask(Window::new(0, 0, 6, 4), None).unwrap().unwrap()[..6], &[255, 255, 255, 255, 0, 0]);
 }
+
+#[test]
+fn floating_infinity_is_data_when_not_declared_nodata() {
+    let mut inputs = sources();
+    if let RasterData::F64(v) = &mut inputs.get_mut("left.tif").unwrap().raster.data {
+        v[0] = f64::INFINITY;
+    }
+    let mut catalog = RasterCatalog::from_layer(index(), inputs, options()).unwrap();
+    let window = Window::new(0, 0, 1, 1);
+    assert_eq!(catalog.read_window(window, &[]).unwrap().raster.band_view(0).as_slice(), &[f64::INFINITY]);
+    assert_eq!(catalog.read_mask(window).unwrap(), vec![255]);
+}

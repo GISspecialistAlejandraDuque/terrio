@@ -565,19 +565,23 @@ through ordinary raster APIs too. Indexes are local files; referenced tiles may 
 The catalog queries the index spatially for each window, opens only selected sources and
 keeps a bounded LRU cache (default 32 datasets). Later feature IDs overwrite earlier ones;
 `--sort-field FIELD` sorts ascending before composition, and `--sort-descending` reverses it.
-Source nodata, dataset masks and zero alpha are transparent; nonzero alpha copies source
-values without blending. Mixed source CRSs are reprojected into the index CRS.
+Source nodata, dataset masks and zero alpha are transparent; TIFF/PNG alpha is detected from
+the source, and `--alpha-band` or catalog color-interpretation metadata identifies it otherwise.
+Nonzero alpha copies source values without blending. Mixed source CRSs are reprojected into the index CRS.
 
 `--layer`, `--location-field`, `--sort-field`, `--tr X Y`, `--te XMIN YMIN XMAX YMAX`,
 `--srs`, `--band-count`, `--ot`, `--nodata`, `--alpha-band`, `--cache-size` and `-r`
 override catalog characteristics. GTI layer metadata and XML supply their equivalents;
 missing resolution, band count and type are inferred from one tile. GeoTIFF/COG pixels stay
-lazy; other formats follow their existing readers. Complete metadata opens zero tiles at startup. `--stats` with `--window` reports logical source opens, cache hits,
+lazy; other formats follow their existing readers. Complete metadata opens zero tiles at startup.
+`--stats` with `--window` reports logical source opens, cache hits,
 selected features, source pixels and peak cached datasets. Whole mosaics write in strips.
 
 The supported GTI subset includes `IndexDataset`, `IndexLayer`, `LocationField`, sort order,
-SRS, resolution, extent, band count/type/nodata and alpha color interpretation. Index and output
-CRSs must match; use `warp` on the catalog to change the output CRS. Arrays and raster sources
-use one common type and nodata value; per-band nodata/type differences, nested GTI catalogs,
+SRS, resolution, extent, band count/type/nodata and alpha color interpretation. Tile sources
+must provide affine geotransforms; pre-warp GCP/RPC or swath sources, or wrap them in warped
+VRTs. Index and output CRSs must match; use `warp` on the catalog to change the output CRS.
+Mosaic bands share one data type and nodata value; per-band nodata/type differences, nested GTI catalogs,
 GTI SQL/filters, explicit GTI overviews, color-table expansion and rotated GTI output grids are
-not implemented. Compositing uses f64; Int64/UInt64 values beyond 2^53 may lose precision. Mark a TIFF alpha band on export with `--co ALPHA=YES` when needed.
+not implemented. Compositing uses f64; Int64/UInt64 values beyond 2^53 may lose precision.
+Mark a TIFF alpha band on export with `--co ALPHA=YES` when needed.

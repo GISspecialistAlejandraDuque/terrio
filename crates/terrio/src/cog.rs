@@ -302,6 +302,25 @@ impl LazyRaster {
         }
     }
 
+    /// The last alpha sample, when a TIFF explicitly tags one (or a PNG has alpha).
+    /// Uses the already open reader, including remote and sparse TIFFs.
+    pub(crate) fn alpha_band(&mut self) -> Option<usize> {
+        match &mut self.inner {
+            Inner::Tiff(t) => {
+                let ifd = t.levels[0].ifd;
+                if t.current_ifd != ifd {
+                    t.decoder.seek_to_image(ifd).ok()?;
+                    t.current_ifd = ifd;
+                }
+                t.decoder.get_tag_u16_vec(Tag::ExtraSamples).ok()?.last().is_some_and(|sample| matches!(*sample, 1 | 2)).then_some(t.bands)
+            }
+            Inner::Memory(ds) | Inner::Source(ds, _) if ds.driver == RasterDriver::PNG && matches!(ds.raster.bands, 2 | 4) => {
+                Some(ds.raster.bands)
+            }
+            _ => None,
+        }
+    }
+
     /// The pixel data type.
     pub fn data_type(&self) -> DataType {
         match &self.inner {

@@ -356,8 +356,7 @@ impl RasterCatalog {
             self.cache.push_back(entry);
             self.stats.cache_hits += 1;
         } else {
-            let mut source_alpha = None;
-            let source = if let Some(memory) = &self.memory {
+            let mut source = if let Some(memory) = &self.memory {
                 let ds = memory.get(location).ok_or_else(|| bad(format!("source '{location}' is missing")))?;
                 let r = &ds.raster;
                 let raster = Raster {
@@ -385,20 +384,12 @@ impl RasterCatalog {
                 } else {
                     self.base.join(location).to_string_lossy().into_owned()
                 };
-                if let Ok(file) = std::fs::File::open(&path)
-                    && let Ok(mut decoder) = tiff::decoder::Decoder::new(file)
-                {
-                    source_alpha = match decoder.colortype().ok() {
-                        Some(tiff::ColorType::RGBA(_)) => Some(4),
-                        Some(tiff::ColorType::GrayA(_)) => Some(2),
-                        _ => None,
-                    };
-                }
                 if is_catalog(&path) {
                     return Err(Error::Unsupported("nested GTI source catalogs are not supported".into()));
                 }
                 LazyRaster::open(&path)?
             };
+            let source_alpha = source.alpha_band();
             if self.cache.len() >= self.options.cache_size.unwrap_or(32) {
                 self.cache.pop_front();
             }
@@ -496,7 +487,7 @@ impl RasterCatalog {
             }
             if source_bands + 1 == count {
                 let alpha = (0..sn)
-                    .map(|i| if (0..source_bands).any(|b| values[b * sn + i].is_finite()) { 255.0 } else { f64::NAN })
+                    .map(|i| if (0..source_bands).any(|b| !values[b * sn + i].is_nan()) { 255.0 } else { f64::NAN })
                     .collect::<Vec<_>>();
                 values.extend(alpha);
                 source_bands += 1;
@@ -523,7 +514,7 @@ impl RasterCatalog {
             )?;
             for b in 0..count {
                 for (i, value) in crate::ops::band_f64(&warped.raster, b).into_iter().enumerate() {
-                    if value.is_finite() {
+                    if !value.is_nan() {
                         out[b * n + i] = value;
                         if alpha != Some(b + 1) {
                             coverage[i] = 255;
@@ -534,7 +525,13 @@ impl RasterCatalog {
         }
         self.last_mask = Some((window, coverage));
         let mut data = RasterData::new_filled(self.header.raster.data_type, elements, 0.0);
-        crate::pixel::with_data!(&mut data,v=>{for (dst,band) in bands.iter().enumerate(){for i in 0..n {v[dst*n+i]=crate::ops::warp_round(out[(band-1)*n+i],self.header.raster.data_type) as _;}}});
+        crate::pixel::with_data!(&mut data, v => {
+            for (dst, band) in bands.iter().enumerate() {
+                for i in 0..n {
+                    v[dst*n+i] = crate::ops::warp_round(out[(band-1)*n+i], self.header.raster.data_type) as _;
+                }
+            }
+        });
         let mut raster = self.header.raster.clone();
         raster.cols = window.width;
         raster.rows = window.height;
