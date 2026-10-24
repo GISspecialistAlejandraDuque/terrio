@@ -110,6 +110,14 @@ pub(crate) trait WindowSource: Send + Sync {
     fn block_size(&self) -> Option<(usize, usize)> {
         None
     }
+    /// Whether the source exposes a dataset-level validity mask.
+    fn has_mask(&self) -> bool {
+        false
+    }
+    /// Reads a mask window: 255 for valid pixels, zero for invalid pixels.
+    fn read_mask(&mut self, _level: usize, _window: Window) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
     /// The source as [`LazyRaster::write`] reads it a strip of rows at a time, several strips at
     /// once; `None` when it is read whole.
     fn streamed(&self) -> Option<&dyn StreamedSource> {
@@ -171,6 +179,9 @@ impl LazyRaster {
     }
 
     fn open_without_sidecars(path: &str) -> Result<Self> {
+        if let Some(result) = crate::catalog::open_lazy(path) {
+            return result;
+        }
         if let Some(result) = crate::stac::open_lazy(path) {
             return result;
         }
@@ -526,6 +537,7 @@ impl LazyRaster {
     pub fn has_mask(&self) -> bool {
         self.sidecar_mask.is_some()
             || match &self.inner {
+                Inner::Source(_, source) => source.has_mask(),
                 Inner::Tiff(t) => t.masks.iter().any(|m| !m.overview && (m.width, m.height) == (t.levels[0].width, t.levels[0].height)),
                 _ => false,
             }
@@ -546,6 +558,9 @@ impl LazyRaster {
         let (fw, fh) = (self.width(), self.height());
         if let Some(m) = self.sidecar_mask.as_mut() {
             return read_sidecar_mask(m, window, (lw, lh)).map(Some);
+        }
+        if let Inner::Source(_, source) = &mut self.inner {
+            return source.read_mask(overview.map_or(0, |i| i + 1), window);
         }
         let Inner::Tiff(t) = &mut self.inner else { return Ok(None) };
         let w = (window.x, window.y, window.width, window.height);
