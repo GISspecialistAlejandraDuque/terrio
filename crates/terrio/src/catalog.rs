@@ -126,6 +126,7 @@ pub struct RasterCatalog {
     memory: Option<Arc<HashMap<String, RasterDataset>>>,
     stats: CatalogStats,
     last_mask: Option<(Window, Vec<u8>)>,
+    input_paths: Option<Vec<String>>,
 }
 fn bad(message: impl std::fmt::Display) -> Error {
     Error::InvalidData(format!("GTI: {message}"))
@@ -244,6 +245,7 @@ impl RasterCatalog {
             memory,
             stats: CatalogStats { index_opens, ..Default::default() },
             last_mask: None,
+            input_paths: None,
         };
         let needs_first = catalog.options.resolution.is_none() || catalog.options.bands.is_none() || catalog.options.data_type.is_none();
         let first = if needs_first {
@@ -827,9 +829,16 @@ impl WindowSource for CatalogSource {
 }
 impl crate::cog::StreamedSource for CatalogSource {
     fn inputs(&self) -> Vec<String> {
+        // Legacy inventory callers cannot represent errors; writers use checked_inputs.
+        self.checked_inputs().unwrap_or_default()
+    }
+    fn checked_inputs(&self) -> Result<Vec<String>> {
         // The writer checks these before creating its destination, so overwriting a source
         // tile uses a completed in-memory read instead of truncating a tile still needed.
-        let catalog = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut catalog = self.0.lock().map_err(|_| bad("catalog lock poisoned"))?;
+        if let Some(paths) = &catalog.input_paths {
+            return Ok(paths.clone());
+        }
         let mut paths = Vec::new();
         let field = catalog.schema.schema.field_index(catalog.options.location_field.as_deref().unwrap_or("location")).unwrap();
         let mut add = |layer: &Layer| {
@@ -849,19 +858,18 @@ impl crate::cog::StreamedSource for CatalogSource {
         match &catalog.index {
             Index::Memory { layer, .. } => add(layer),
             Index::File { path, layer, .. } => {
-                if let Ok(readers) =
-                    crate::stream::open_layers(path, &VectorOpenOptions { layers: vec![layer.clone()], ..Default::default() }, 4096)
-                {
-                    for mut reader in readers {
-                        while let Ok(Some(chunk)) = reader.read_chunk(4096) {
-                            add(&chunk);
-                        }
+                let readers =
+                    crate::stream::open_layers(path, &VectorOpenOptions { layers: vec![layer.clone()], ..Default::default() }, 4096)?;
+                for mut reader in readers {
+                    while let Some(chunk) = reader.read_chunk(4096)? {
+                        add(&chunk);
                     }
                 }
                 paths.push(path.clone());
             }
         }
-        paths
+        catalog.input_paths = Some(paths.clone());
+        Ok(paths)
     }
     fn read_rows(&self, window: Window, bands: &[usize]) -> Result<RasterData> {
         Ok(self.0.lock().map_err(|_| bad("catalog lock poisoned"))?.read_window(window, bands)?.raster.data)

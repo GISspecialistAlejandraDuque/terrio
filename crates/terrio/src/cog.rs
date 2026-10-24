@@ -133,6 +133,11 @@ pub(crate) trait StreamedSource: Sync {
     /// The local files the source reads: an output replacing one of them is written from the
     /// source read whole.
     fn inputs(&self) -> Vec<String>;
+    /// Source inventory for the overwrite guard. Readers that can fail while
+    /// enumerating inputs override this so no destination is opened on failure.
+    fn checked_inputs(&self) -> Result<Vec<String>> {
+        Ok(self.inputs())
+    }
     /// Reads a full-resolution window of some bands (numbered from 1), band after band.
     fn read_rows(&self, window: Window, bands: &[usize]) -> Result<RasterData>;
 }
@@ -463,7 +468,7 @@ impl LazyRaster {
         let value_size = self.data_type().size_bytes();
         if let Inner::Source(ds, s) = &self.inner
             && let Some(s) = s.streamed()
-            && !crate::ops::strips::overwrites(path, &s.inputs())
+            && !crate::ops::strips::overwrites(path, &s.checked_inputs()?)
         {
             // Strips of a row of blocks, several read at once: blocks slow to decode overlap the
             // next strips' blocks rather than keep the other threads waiting.

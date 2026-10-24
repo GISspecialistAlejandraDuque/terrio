@@ -178,3 +178,33 @@ fn many_disjoint_tiles_warp_only_their_intersections() {
         assert_eq!(*value, ((i % 128) / 4) as f64);
     }
 }
+
+#[cfg(all(unix, feature = "sqlite", feature = "geotiff"))]
+#[test]
+fn failed_source_inventory_never_truncates_the_destination() {
+    let directory = tempfile::tempdir().unwrap();
+    for (name, dataset) in sources() {
+        terrio::write_raster_dataset(&dataset, directory.path().join(name).to_str().unwrap(), &Default::default()).unwrap();
+    }
+    let index_path = directory.path().join("tiles.gti.gpkg");
+    terrio::write_vector(&[index()], index_path.to_str().unwrap(), &Default::default()).unwrap();
+    let mut catalog = RasterCatalog::open(index_path.to_str().unwrap(), options()).unwrap().into_lazy();
+    std::fs::rename(&index_path, index_path.with_extension("moved")).unwrap();
+    let destination = directory.path().join("left.tif");
+    let original = std::fs::read(&destination).unwrap();
+    assert!(catalog.write(destination.to_str().unwrap(), &Default::default()).is_err());
+    assert_eq!(std::fs::read(&destination).unwrap(), original);
+
+    // Once a complete inventory has been obtained, repeated exports reuse it.
+    let moved = index_path.with_extension("moved");
+    std::fs::rename(&moved, &index_path).unwrap();
+    let mut catalog = RasterCatalog::open(index_path.to_str().unwrap(), options()).unwrap().into_lazy();
+    let first = directory.path().join("first.tif");
+    let second = directory.path().join("second.tif");
+    catalog.write(first.to_str().unwrap(), &Default::default()).unwrap();
+    std::fs::rename(&index_path, moved).unwrap();
+    catalog.write(second.to_str().unwrap(), &Default::default()).unwrap();
+    let first = terrio::open_raster(first.to_str().unwrap()).unwrap();
+    let second = terrio::open_raster(second.to_str().unwrap()).unwrap();
+    assert_eq!(first.raster.band_view(0).as_slice(), second.raster.band_view(0).as_slice());
+}
