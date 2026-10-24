@@ -185,6 +185,17 @@ Options are `locationField`, `sortField`, `sortDescending`, `tr`, `te`, `srs`, `
 transparent; tiles in other CRSs are reprojected into the index CRS. See
 [CLI catalogs](cli.md#catalog) for the supported GTI subset.
 
+## Pansharpening
+
+```javascript
+const sharp = terrio.pansharpen(pan, rgbnir, { bands: [1, 2, 3], bitdepth: 12, nodata: 0 });
+const rgb = terrio.pansharpen(pan, [red, green, blue], { weights: [0.6, 0.3, 0.1] });
+```
+
+Inputs can be datasets or raster bytes. All spectral inputs contribute to intensity;
+`bands` selects/reorders output bands. See [pansharpen](cli.md#pansharpen) for working
+types, interpolation, nodata, bit depth and extent handling.
+
 ## SQL queries
 
 `sql(src, query)` returns a `Dataset` using the shared [OGR SQL subset](sql.md).
