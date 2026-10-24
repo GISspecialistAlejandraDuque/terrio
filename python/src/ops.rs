@@ -1343,7 +1343,7 @@ fn open_catalog(
     {
         py.detach(|| terrio::catalog::RasterCatalog::open(&path, options)).py()?
     } else {
-        let mut layers = input_layers(py, index, None)?;
+        let mut layers = input_layers(py, index, options.layer.clone().map(|name| vec![name]))?;
         if layers.len() != 1 {
             return Err(invalid("an in-memory catalog needs one index layer"));
         }

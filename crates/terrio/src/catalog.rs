@@ -49,14 +49,20 @@ pub struct CatalogOptions {
 /// Cumulative logical I/O counters, useful for checking small-window access and cache bounds.
 #[derive(Debug, Clone, Copy, Default, serde::Serialize)]
 pub struct CatalogStats {
+    /// Persistent index query readers opened (zero for an in-memory index).
+    pub index_opens: usize,
+    /// Spatial selection requests.
+    pub index_queries: usize,
     /// Index features returned by spatial queries.
     pub selected_features: usize,
     /// Source dataset opens (including reopens after eviction).
     pub source_opens: usize,
     /// Cache hits.
     pub cache_hits: usize,
-    /// Source pixels requested (across all bands, before reprojection).
+    /// Data/alpha sample values requested before reprojection; separate mask images are excluded.
     pub source_pixels: usize,
+    /// Destination sample values warped, after clipping each tile to the output window.
+    pub warped_pixels: usize,
     /// Largest number of simultaneously cached source datasets.
     pub peak_cached_sources: usize,
 }
@@ -77,8 +83,35 @@ impl rstar::RTreeObject for IndexCell {
         self.envelope
     }
 }
+trait IndexReader: Send + Sync {
+    fn first(&mut self) -> Result<Layer>;
+    fn query(&mut self, bounds: Option<Bounds>) -> Result<Layer>;
+}
+#[cfg(feature = "sqlite")]
+impl IndexReader for crate::drivers::vector::gpkg_read::IndexedLayer {
+    fn first(&mut self) -> Result<Layer> {
+        crate::drivers::vector::gpkg_read::IndexedLayer::first(self)
+    }
+    fn query(&mut self, bounds: Option<Bounds>) -> Result<Layer> {
+        crate::drivers::vector::gpkg_read::IndexedLayer::query(self, bounds)
+    }
+}
+#[cfg(feature = "flatgeobuf")]
+struct FgbIndex {
+    file: std::fs::File,
+    prepared: crate::drivers::vector::flatgeobuf::PreparedIndex,
+}
+#[cfg(feature = "flatgeobuf")]
+impl IndexReader for FgbIndex {
+    fn first(&mut self) -> Result<Layer> {
+        self.prepared.first(&mut self.file)
+    }
+    fn query(&mut self, bounds: Option<Bounds>) -> Result<Layer> {
+        self.prepared.query(&mut self.file, bounds)
+    }
+}
 enum Index {
-    File { path: String, layer: String },
+    File { path: String, layer: String, reader: Box<dyn IndexReader> },
     Memory { layer: Box<Layer>, tree: rstar::RTree<IndexCell> },
 }
 /// A catalog whose pixels are assembled on demand. Local catalogs use the index's on-disk
@@ -140,11 +173,11 @@ impl RasterCatalog {
             };
             apply_xml(&root, &mut options)?;
         }
-        let (schema, bounds, metadata) = index_header(&index_path, options.layer.as_deref())?;
+        let (reader, schema, bounds, metadata) = index_header(&index_path, options.layer.as_deref())?;
         apply_metadata(&metadata, &mut options)?;
         let layer = schema.name.clone();
         let base = Path::new(&index_path).parent().unwrap_or(Path::new(".")).to_path_buf();
-        Self::initialize(Index::File { path: index_path, layer }, schema, bounds, base, options, None)
+        Self::initialize(Index::File { path: index_path, layer, reader }, schema, bounds, base, options, None)
     }
     /// Opens an index layer and named source rasters already held in memory, including WASM.
     pub fn from_layer(layer: Layer, sources: HashMap<String, RasterDataset>, options: CatalogOptions) -> Result<Self> {
@@ -200,6 +233,7 @@ impl RasterCatalog {
             .map_err(bad)?,
             false,
         );
+        let index_opens = usize::from(matches!(&index, Index::File { .. }));
         let mut catalog = Self {
             index,
             schema,
@@ -208,12 +242,12 @@ impl RasterCatalog {
             header: placeholder,
             cache: VecDeque::new(),
             memory,
-            stats: CatalogStats::default(),
+            stats: CatalogStats { index_opens, ..Default::default() },
             last_mask: None,
         };
         let needs_first = catalog.options.resolution.is_none() || catalog.options.bands.is_none() || catalog.options.data_type.is_none();
         let first = if needs_first {
-            let layer = match &catalog.index {
+            let layer = match &mut catalog.index {
                 Index::Memory { layer, .. } => {
                     let mut first = crate::stream::schema_of(layer);
                     if let Some(feature) = layer.features.first() {
@@ -221,11 +255,7 @@ impl RasterCatalog {
                     }
                     first
                 }
-                Index::File { path, layer } => {
-                    let mut readers =
-                        crate::stream::open_layers(path, &VectorOpenOptions { layers: vec![layer.clone()], ..Default::default() }, 1)?;
-                    readers[0].read_chunk(1)?.ok_or_else(|| bad("tile index is empty"))?
-                }
+                Index::File { reader, .. } => reader.first()?,
             };
             let field = layer.schema.field_index(catalog.options.location_field.as_deref().unwrap_or("location")).unwrap();
             let location = layer
@@ -305,11 +335,9 @@ impl RasterCatalog {
         LazyRaster::from_source(self.header.clone(), Box::new(CatalogSource(std::sync::Mutex::new(self))))
     }
     fn select(&mut self, bounds: Option<(f64, f64, f64, f64)>) -> Result<Vec<Entry>> {
-        let layers = match &self.index {
-            Index::File { path, layer } => {
-                crate::open_vector(path, &VectorOpenOptions { layers: vec![layer.clone()], spatial_filter: bounds, ..Default::default() })?
-                    .layers
-            }
+        self.stats.index_queries += 1;
+        let layers = match &mut self.index {
+            Index::File { reader, .. } => vec![reader.query(bounds)?],
             Index::Memory { layer, tree } => {
                 let mut selected = crate::stream::schema_of(layer);
                 selected.features = if let Some(b) = bounds {
@@ -433,11 +461,38 @@ impl RasterCatalog {
         for entry in entries {
             let resampling = self.options.resampling.unwrap_or_default();
             let (tile, detected_alpha) = self.source(&entry.location)?;
-            let src_bounds = if tile.crs().same_as(&srs) || tile.crs().is_unknown() || srs.is_unknown() {
-                bounds
+            let tile_gt = tile.geo_transform();
+            let corners =
+                [(0.0, 0.0), (tile.width() as f64, 0.0), (0.0, tile.height() as f64), (tile.width() as f64, tile.height() as f64)]
+                    .map(|(x, y)| apply_gt(&tile_gt, x, y));
+            let footprint = (
+                corners.iter().map(|p| p.0).fold(f64::INFINITY, f64::min),
+                corners.iter().map(|p| p.1).fold(f64::INFINITY, f64::min),
+                corners.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max),
+                corners.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max),
+            );
+            let same_crs = tile.crs().same_as(&srs) || tile.crs().is_unknown() || srs.is_unknown();
+            // A densified envelope conservatively bounds transformed tile edges. If a
+            // forward transform crosses its valid domain, keep the whole request and
+            // let warp's inverse transform determine valid destination pixels.
+            let footprint = if same_crs {
+                footprint
             } else {
-                crate::ops::transform_bounds(&crate::ops::Ct::new(&srs, &tile.crs())?, bounds, 21)?
+                crate::ops::Ct::new(&tile.crs(), &srs).and_then(|ct| crate::ops::transform_bounds(&ct, footprint, 21)).unwrap_or(bounds)
             };
+            let cx0 = ((footprint.0 - origin.0) / gt[1]).floor().clamp(0.0, window.width as f64) as usize;
+            let cy0 = ((footprint.3 - origin.1) / gt[5]).floor().clamp(0.0, window.height as f64) as usize;
+            let cx1 = ((footprint.2 - origin.0) / gt[1]).ceil().clamp(0.0, window.width as f64) as usize;
+            let cy1 = ((footprint.1 - origin.1) / gt[5]).ceil().clamp(0.0, window.height as f64) as usize;
+            if cx1 <= cx0 || cy1 <= cy0 {
+                continue;
+            }
+            let (cw, ch) = (cx1 - cx0, cy1 - cy0);
+            let sub_origin = apply_gt(&dst_gt, cx0 as f64, cy0 as f64);
+            let sub_gt = [sub_origin.0, gt[1], 0.0, sub_origin.1, 0.0, gt[5]];
+            let sub_bounds = (sub_origin.0, sub_origin.1 + gt[5] * ch as f64, sub_origin.0 + gt[1] * cw as f64, sub_origin.1);
+            let src_bounds =
+                if same_crs { sub_bounds } else { crate::ops::transform_bounds(&crate::ops::Ct::new(&srs, &tile.crs())?, sub_bounds, 21)? };
             let inv = invert_gt(&tile.geo_transform()).ok_or_else(|| bad("source geotransform is not invertible"))?;
             let points =
                 [(src_bounds.0, src_bounds.1), (src_bounds.0, src_bounds.3), (src_bounds.2, src_bounds.1), (src_bounds.2, src_bounds.3)]
@@ -453,8 +508,8 @@ impl RasterCatalog {
                 points.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max) - points.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
             let span_y =
                 points.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max) - points.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
-            let pad_x = (kernel * (span_x / window.width as f64).max(1.0)).ceil();
-            let pad_y = (kernel * (span_y / window.height as f64).max(1.0)).ceil();
+            let pad_x = (kernel * (span_x / cw as f64).max(1.0)).ceil();
+            let pad_y = (kernel * (span_y / ch as f64).max(1.0)).ceil();
             let x0 = (points.iter().map(|p| p.0).fold(f64::INFINITY, f64::min).floor() - pad_x).max(0.0).min(tile.width() as f64) as usize;
             let y0 = (points.iter().map(|p| p.1).fold(f64::INFINITY, f64::min).floor() - pad_y).max(0.0).min(tile.height() as f64) as usize;
             let x1 =
@@ -465,7 +520,7 @@ impl RasterCatalog {
                 continue;
             }
             let src_window = Window::new(x0, y0, x1 - x0, y1 - y0);
-            let mask = tile.read_mask(src_window, None)?;
+            let mask = if tile.has_mask() { tile.read_mask(src_window, None)? } else { None };
             let mut source = tile.read_window(src_window, &WindowOptions::default())?;
             let sn = src_window.width * src_window.height;
             let read_bands = source.raster.bands;
@@ -475,7 +530,12 @@ impl RasterCatalog {
             }
             let source_alpha =
                 if source_bands == count + 1 { Some(source_bands) } else { detected_alpha.or(alpha).filter(|b| *b <= source_bands) };
-            let mut values = (0..source_bands).flat_map(|b| crate::ops::band_f64(&source.raster, b)).collect::<Vec<_>>();
+            let data = std::mem::replace(&mut source.raster.data, RasterData::F64(Vec::new()));
+            #[allow(clippy::unnecessary_cast)]
+            let mut values = match data {
+                RasterData::F64(values) => values,
+                data => crate::pixel::with_data!(&data, values => values.iter().map(|&v|v as f64).collect::<Vec<f64>>()),
+            };
             for i in 0..sn {
                 let invalid = mask.as_ref().is_some_and(|m| m[i] == 0) || source_alpha.is_some_and(|b| values[(b - 1) * sn + i] == 0.0);
                 for b in 0..source_bands {
@@ -498,12 +558,13 @@ impl RasterCatalog {
             source.raster.nodata = f64::NAN;
             source.has_nodata = true;
             self.stats.source_pixels += sn * read_bands;
+            self.stats.warped_pixels += cw * ch * count;
             let warped = crate::ops::warp::warp(
                 &[&source],
                 &WarpOptions {
                     dst_srs: Some(srs.clone()),
-                    dst_transform: Some(dst_gt),
-                    size: Some((window.width, window.height)),
+                    dst_transform: Some(sub_gt),
+                    size: Some((cw, ch)),
                     resampling,
                     src_nodata: Nodata::Auto,
                     dst_nodata: Nodata::Values(vec![f64::NAN]),
@@ -513,7 +574,8 @@ impl RasterCatalog {
                 },
             )?;
             for b in 0..count {
-                for (i, value) in crate::ops::band_f64(&warped.raster, b).into_iter().enumerate() {
+                for (k, value) in warped.raster.band_view(b).as_slice().iter().copied().enumerate() {
+                    let i = (cy0 + k / cw) * window.width + cx0 + k % cw;
                     if !value.is_nan() {
                         out[b * n + i] = value;
                         if alpha != Some(b + 1) {
@@ -545,7 +607,9 @@ impl RasterCatalog {
 
 type Bounds = (f64, f64, f64, f64);
 type Metadata = Vec<(String, String)>;
-fn index_header(path: &str, _wanted: Option<&str>) -> Result<(Layer, Option<Bounds>, Metadata)> {
+type IndexHeader = (Box<dyn IndexReader>, Layer, Option<Bounds>, Metadata);
+#[cfg_attr(not(any(feature = "sqlite", feature = "flatgeobuf")), allow(unused_variables))]
+fn index_header(path: &str, wanted: Option<&str>) -> Result<IndexHeader> {
     let extension = crate::formats::extension(path).unwrap_or_default();
     #[cfg(feature = "sqlite")]
     if extension == "gpkg" {
@@ -585,7 +649,7 @@ fn index_header(path: &str, _wanted: Option<&str>) -> Result<(Layer, Option<Boun
             items
         };
         let dataset_metadata = metadata_for(None);
-        let name = _wanted.or_else(|| dataset_metadata.iter().find(|(k, _)| k == "TILE_INDEX_LAYER").map(|(_, v)| v.as_str()));
+        let name = wanted.or_else(|| dataset_metadata.iter().find(|(k, _)| k == "TILE_INDEX_LAYER").map(|(_, v)| v.as_str()));
         let content = if let Some(name) = name {
             contents.iter().find(|c| c.name == name).ok_or_else(|| bad(format!("no index layer '{name}'")))?
         } else {
@@ -594,7 +658,6 @@ fn index_header(path: &str, _wanted: Option<&str>) -> Result<(Layer, Option<Boun
             }
             &contents[0]
         };
-        let layer = gpkg_read::layer_def(&db, content)?.layer;
         let contents_table = db.table("gpkg_contents")?;
         let bounds = contents_table
             .rows
@@ -608,27 +671,28 @@ fn index_header(path: &str, _wanted: Option<&str>) -> Result<(Layer, Option<Boun
                     contents_table.get(r, "max_y")?.as_f64()?,
                 ))
             });
-        return Ok((layer, bounds, metadata_for(Some(&content.name))));
+        let metadata = metadata_for(Some(&content.name));
+        let reader = gpkg_read::IndexedLayer::new(db, content)?;
+        let layer = reader.layer().clone();
+        return Ok((Box::new(reader), layer, bounds, metadata));
     }
     #[cfg(feature = "flatgeobuf")]
     if extension == "fgb" {
-        use std::io::{Read, Seek, SeekFrom};
         let mut file = std::fs::File::open(path)?;
         let len = file.metadata()?.len();
-        let (info, layer) = crate::drivers::vector::flatgeobuf::read_header(&mut file, len)?;
-        if _wanted.is_some_and(|w| w != layer.name) {
+        let prepared = crate::drivers::vector::flatgeobuf::PreparedIndex::open(&mut file, len)?;
+        if wanted.is_some_and(|w| w != prepared.layer.name) {
             return Err(bad("no requested FlatGeobuf layer"));
         }
-        file.seek(SeekFrom::Start(0))?;
-        let mut header = vec![0; info.header_size as usize];
-        file.read_exact(&mut header)?;
-        let metadata = flatgeobuf::size_prefixed_root_as_header(&header[8..])
-            .ok()
-            .and_then(|h| h.metadata())
+        let metadata = prepared
+            .metadata
+            .as_deref()
             .and_then(|text| serde_json::from_str::<HashMap<String, serde_json::Value>>(text).ok())
             .map(|m| m.into_iter().map(|(k, v)| (k, v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))).collect())
             .unwrap_or_default();
-        return Ok((layer, info.extent.map(|b| (b[0], b[1], b[2], b[3])), metadata));
+        let layer = prepared.layer.clone();
+        let bounds = prepared.info.extent.map(|b| (b[0], b[1], b[2], b[3]));
+        return Ok((Box::new(FgbIndex { file, prepared }), layer, bounds, metadata));
     }
     Err(Error::Unsupported(format!("GTI index '{path}' requires an enabled GeoPackage or FlatGeobuf driver (found '{extension}')")))
 }
@@ -784,7 +848,7 @@ impl crate::cog::StreamedSource for CatalogSource {
         };
         match &catalog.index {
             Index::Memory { layer, .. } => add(layer),
-            Index::File { path, layer } => {
+            Index::File { path, layer, .. } => {
                 if let Ok(readers) =
                     crate::stream::open_layers(path, &VectorOpenOptions { layers: vec![layer.clone()], ..Default::default() }, 4096)
                 {

@@ -337,7 +337,12 @@ def main():
                 capture_output=True,
                 text=True,
             )
-            stats = json.loads(proc.stdout) if proc.returncode == 0 else {}
+            try:
+                stats = json.loads(proc.stdout) if proc.returncode == 0 else {}
+                if not isinstance(stats, dict):
+                    stats = {}
+            except json.JSONDecodeError:
+                stats = {}
             stats.update(
                 http_bytes=RangeHandler.bytes_sent,
                 http_sources=len(RangeHandler.paths),
@@ -367,13 +372,15 @@ def main():
                 or startup_bytes
                 or startup_sources
                 or proc.returncode
+                or stats.get("index_opens") != 1
+                or stats.get("index_queries") != 1
                 or stats.get("source_opens") != 1
                 or stats.get("selected_features") != 1
                 or stats.get("http_sources") != 1
                 or not stats.get("http_bytes")
                 or stats.get("peak_cached_sources") != 1
             ):
-                result["error"] = proc.stderr or f"unexpected I/O counters: {stats}"
+                result["error"] = (proc.stderr if proc.returncode else "") or f"unexpected I/O counters: {stats}"
             results.append(result)
         finally:
             server.shutdown()

@@ -76,6 +76,7 @@ fn z_order_and_nodata_transparency() {
     let mut catalog = RasterCatalog::from_layer(index(), input, CatalogOptions { sort_field: Some("z".into()), ..options() }).unwrap();
     let ds = catalog.read_window(Window::new(0, 0, 6, 4), &[]).unwrap();
     assert_eq!(&ds.raster.band_view(0).as_slice()[..6], &[10.0, 10.0, 10.0, 20.0, 20.0, 20.0]);
+    assert_eq!(catalog.stats().warped_pixels, 32);
     assert!(catalog.read_mask(Window::new(0, 0, 6, 4)).unwrap().iter().all(|v| *v == 255));
 }
 #[test]
@@ -105,4 +106,75 @@ fn floating_infinity_is_data_when_not_declared_nodata() {
     let window = Window::new(0, 0, 1, 1);
     assert_eq!(catalog.read_window(window, &[]).unwrap().raster.band_view(0).as_slice(), &[f64::INFINITY]);
     assert_eq!(catalog.read_mask(window).unwrap(), vec![255]);
+}
+
+#[cfg(any(feature = "sqlite", feature = "flatgeobuf"))]
+#[test]
+fn file_index_reader_is_reused_across_windows() {
+    let directory = tempfile::tempdir().unwrap();
+    for (name, dataset) in sources() {
+        terrio::write_raster_dataset(&dataset, directory.path().join(name).to_str().unwrap(), &Default::default()).unwrap();
+    }
+    let mut extensions = Vec::new();
+    #[cfg(feature = "sqlite")]
+    extensions.push("gpkg");
+    #[cfg(feature = "flatgeobuf")]
+    extensions.push("fgb");
+    for extension in extensions {
+        let path = directory.path().join(format!("tiles.gti.{extension}"));
+        terrio::write_vector(&[index()], path.to_str().unwrap(), &Default::default()).unwrap();
+        let mut catalog = RasterCatalog::open(path.to_str().unwrap(), options()).unwrap();
+        assert_eq!(catalog.stats().index_opens, 1);
+        // On Unix an open file remains readable after rename. A per-window reopen
+        // of the original path fails, so this checks the persistent handle too.
+        #[cfg(unix)]
+        std::fs::rename(&path, path.with_extension(format!("{extension}.moved"))).unwrap();
+        for (x, value) in [(0, 10.0), (5, 20.0), (0, 10.0)] {
+            let result = catalog.read_window(Window::new(x, 0, 1, 1), &[]).unwrap();
+            assert_eq!(result.raster.band_view(0).as_slice(), &[value]);
+        }
+        assert_eq!(catalog.stats().index_opens, 1);
+        assert_eq!(catalog.stats().index_queries, 3);
+        assert_eq!(catalog.stats().peak_cached_sources, 1);
+        let mut available = index();
+        available.features.truncate(2);
+        let inferred_path = directory.path().join(format!("infer.gti.{extension}"));
+        terrio::write_vector(&[available], inferred_path.to_str().unwrap(), &Default::default()).unwrap();
+        let inferred = RasterCatalog::open(
+            inferred_path.to_str().unwrap(),
+            CatalogOptions { resolution: None, bands: None, data_type: None, ..options() },
+        )
+        .unwrap();
+        assert_eq!(inferred.stats().source_opens, 1);
+        assert_eq!(inferred.header().raster.data_type, DataType::F64);
+        assert_eq!((inferred.header().raster.cols, inferred.header().raster.rows), (6, 4));
+    }
+}
+
+#[test]
+fn many_disjoint_tiles_warp_only_their_intersections() {
+    let mut footprints = index();
+    footprints.features.clear();
+    let mut inputs = HashMap::new();
+    for i in 0..32 {
+        let x = i as f64 * 4.0;
+        let name = format!("tile-{i}");
+        inputs.insert(name.clone(), tile(x, i as f64));
+        let mut feature = Feature::with_geometry(
+            i,
+            Geometry::polygon(vec![Coord::xy(x, 0.0), Coord::xy(x + 4.0, 0.0), Coord::xy(x + 4.0, 4.0), Coord::xy(x, 4.0)], vec![]),
+            2,
+        );
+        feature.attributes = vec![FieldValue::Text(name), FieldValue::Integer(i as i64)];
+        footprints.push(feature);
+    }
+    let mut catalog =
+        RasterCatalog::from_layer(footprints, inputs, CatalogOptions { extent: Some((0.0, 0.0, 128.0, 4.0)), ..options() }).unwrap();
+    let output = catalog.read_window(Window::new(0, 0, 128, 4), &[]).unwrap();
+    assert_eq!(catalog.stats().selected_features, 32);
+    assert_eq!(catalog.stats().warped_pixels, 128 * 4);
+    assert_eq!(catalog.stats().source_pixels, 128 * 4);
+    for (i, value) in output.raster.band_view(0).as_slice().iter().enumerate() {
+        assert_eq!(*value, ((i % 128) / 4) as f64);
+    }
 }

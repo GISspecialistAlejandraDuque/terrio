@@ -57,3 +57,25 @@ def test_catalog_coverage_mask():
     # The unavailable right tile is outside this mask window.
     np.testing.assert_array_equal(catalog.read_mask(window=(0, 0, 2, 2)), np.full((2, 2), 255))
     np.testing.assert_array_equal(catalog.read_mask(window=(6, 0, 2, 2)), np.zeros((2, 2)))
+
+
+def test_named_layer_in_memory_index(tmp_path):
+    left = terrio.Raster.from_array(
+        np.full((4, 4), 10, dtype="float32"), (0, 1, 0, 4, 0, -1), crs="EPSG:4326"
+    )
+    selected = terrio.Layer.from_geojson(index(), name="selected")
+    other = terrio.Layer.from_geojson(index(), name="other")
+    path = tmp_path / "multiple.gpkg"
+    terrio.write_vector([other, selected], str(path))
+    dataset = terrio.open_vector(str(path))
+    for supplied in [dataset, [other, selected]]:
+        catalog = terrio.open_catalog(
+            supplied,
+            {"left": left},
+            layer="selected",
+            tr=(1, 1),
+            te=(0, 0, 4, 4),
+            bands=1,
+            ot="Float32",
+        )
+        np.testing.assert_array_equal(catalog.read(1, window=(0, 0, 1, 1)), [[10]])

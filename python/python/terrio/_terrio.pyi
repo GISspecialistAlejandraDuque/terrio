@@ -18,6 +18,7 @@ __all__ = [
     "from_arrow",
     "open",
     "open_raster",
+    "open_catalog",
     "open_vector",
     "open_bytes",
     "list_layers",
@@ -1087,7 +1088,6 @@ def open_catalog(
     cache_size: int | None = None,
     resampling: str | None = None,
 ) -> Raster: ...
-
 def sql(src: Any, query: str, *, layers: list[str] | None = None) -> Layer:
     """Run the documented OGR SQL subset; DISTINCT and summaries discard geometry."""
     ...

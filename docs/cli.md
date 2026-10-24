@@ -598,11 +598,14 @@ terrio info GTI:tiles.gpkg --json
 ```
 
 GTI-compatible GeoPackage/FlatGeobuf indexes contain polygon footprints and a string
-`location` field naming each source. Relative tile paths resolve against the index directory.
+`location` field naming each source. Relative tile paths resolve against the index directory;
+absolute paths, URLs and supported VSI references select those sources directly. GTI XML
+`IndexDataset` likewise accepts a relative or absolute index path.
 `GTI:` forces catalog interpretation; `.gti.gpkg`, `.gti.fgb` and GTI XML `.gti` files open
 through ordinary raster APIs too. Indexes are local files; referenced tiles may be remote COGs.
 
-The catalog queries the index spatially for each window, opens only selected sources and
+The catalog retains one index reader and parsed schema, queries it spatially for each window,
+opens only selected sources and
 keeps a bounded LRU cache (default 32 datasets). Later feature IDs overwrite earlier ones;
 `--sort-field FIELD` sorts ascending before composition, and `--sort-descending` reverses it.
 Source nodata, dataset masks and zero alpha are transparent; TIFF/PNG alpha is detected from
@@ -614,8 +617,9 @@ Nonzero alpha copies source values without blending. Mixed source CRSs are repro
 override catalog characteristics. GTI layer metadata and XML supply their equivalents;
 missing resolution, band count and type are inferred from one tile. GeoTIFF/COG pixels stay
 lazy; other formats follow their existing readers. Complete metadata opens zero tiles at startup.
-`--stats` with `--window` reports logical source opens, cache hits,
-selected features, source pixels and peak cached datasets. Whole mosaics write in strips.
+`--stats` with `--window` reports persistent index reader opens/queries, logical source opens,
+cache hits, selected features, source pixels (excluding separate mask samples), warped destination
+samples and peak cached datasets. Each tile is warped only over its intersection with the request. Whole mosaics write in strips.
 
 The supported GTI subset includes `IndexDataset`, `IndexLayer`, `LocationField`, sort order,
 SRS, resolution, extent, band count/type/nodata and alpha color interpretation. Tile sources
