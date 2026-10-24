@@ -183,3 +183,22 @@ Options are `locationField`, `sortField`, `sortDescending`, `tr`, `te`, `srs`, `
 `nodata`, `alphaBand`, `cacheSize` and `resampling`. Source masks/nodata and zero alpha are
 transparent; tiles in other CRSs are reprojected into the index CRS. See
 [CLI catalogs](cli.md#catalog) for the supported GTI subset.
+
+## Geolocation-array warping
+
+Pass longitude and latitude rasters explicitly when array datasets cannot be reopened from
+paths in WebAssembly. `x` and `y` accept a `Dataset`, file bytes, or `{ bytes, filename }`:
+
+```javascript
+const output = terrio.warp(swath, {
+  tSrs: "EPSG:4326",
+  geolocation: { x: longitude, y: latitude, pixelStep: 2, lineStep: 2, pixelCenter: true },
+});
+```
+
+`xBand` and `yBand` select the 1-based coordinate bands (default 1).
+Optional `srs` defaults to EPSG:4326, `pixelOffset`/`lineOffset` to 0, and steps to 1.
+`pixelCenter` shifts by half an array step. `geoloc: true` requires geolocation metadata;
+the explicit `geolocation` option supplies arrays for the first source. The operation remains
+pure Rust in full and core WASM builds. See [CLI warping](cli.md#warp) for invalid coordinates,
+antimeridian handling and boundary differences from GDAL.
