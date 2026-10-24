@@ -18,6 +18,7 @@ Suites:
     ops               translate, warp, mosaic vs GDAL's tools (compare_ops_with_gdal.py)
     catalogs          indexed real DEM mosaics and HTTP window I/O vs GDAL GTI
                       (compare_catalogs_with_gdal.py)
+    overviews         source overview selection and HTTP COG bytes vs gdalwarp -ovr
     dem-calc          dem, calc, proximity, sieve vs GDAL's tools (compare_dem_calc_with_gdal.py)
     vector-ops        ogr2ogr options, rasterize, polygonize (compare_vector_ops_with_gdal.py)
     topology          buffer, polygon overlay/dissolve, validity, repair and cleanup vs GEOS
@@ -462,6 +463,18 @@ def suite_catalogs(ctx):
         "mixed CRS and Terrio-written indexes cross-read by GDAL. Grids, masks and pixels "
         "are compared (1e-4 numerical tolerance). A small HTTP window verifies one source "
         "opened from a 1,002-feature index and records actual bytes for both implementations.", 2,
+    )
+
+
+def suite_overviews(ctx):
+    """Stored source levels and HTTP COG transfers against gdalwarp."""
+    return suite_json_ops(
+        ctx, "overviews", "compare_overviews_with_gdal.py", "Warp source overviews",
+        "`gdalwarp -ovr`",
+        "Full-resolution target grids, source-level selection and output pixels must match GDAL. "
+        "Synthetic level markers and real USGS terrain exercise AUTO, AUTO-n, NONE and forced levels. "
+        "A real COG served over HTTP must transfer less than half as many raster bytes with AUTO as NONE.",
+        2,
     )
 
 
@@ -1008,6 +1021,7 @@ SUITES = OrderedDict(
         ("windows", suite_windows),
         ("ops", suite_ops),
         ("catalogs", suite_catalogs),
+        ("overviews", suite_overviews),
         ("geolocation", suite_geolocation),
         ("dem-calc", suite_dem_calc),
         ("vector-ops", suite_vector_ops),
