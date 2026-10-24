@@ -352,6 +352,8 @@ impl RasterCatalog {
         let sort = self.options.sort_field.as_ref().and_then(|name| self.schema.schema.field_index(name));
         let mut rows = Vec::new();
         let mut add = |feature: &wbvector::Feature| -> Result<()> {
+            // Tile footprints need positive-area overlap. Inclusive index queries
+            // are a broad phase; touching edges and zero-area footprints are excluded.
             if let Some(bounds) = bounds
                 && !feature.geometry.as_ref().is_some_and(|g| {
                     g.bbox().is_some_and(|b| b.min_x < bounds.2 && b.max_x > bounds.0 && b.min_y < bounds.3 && b.max_y > bounds.1)
@@ -482,7 +484,8 @@ impl RasterCatalog {
             let footprint = if same_crs {
                 footprint
             } else {
-                crate::ops::Ct::new(&tile.crs(), &srs).and_then(|ct| crate::ops::transform_bounds(&ct, footprint, 21)).unwrap_or(bounds)
+                let ct = crate::ops::Ct::new(&tile.crs(), &srs)?;
+                crate::ops::transform_bounds(&ct, footprint, 21).unwrap_or(bounds)
             };
             let cx0 = ((footprint.0 - origin.0) / gt[1]).floor().clamp(0.0, window.width as f64) as usize;
             let cy0 = ((footprint.3 - origin.1) / gt[5]).floor().clamp(0.0, window.height as f64) as usize;
@@ -570,9 +573,13 @@ impl RasterCatalog {
                 let mut selected = Vec::with_capacity(sn * wanted.len());
                 for band in &wanted {
                     if generated_alpha && *band == count {
-                        selected.extend(
-                            (0..sn).map(|i| if (0..read_bands.len()).any(|b| !values[b * sn + i].is_nan()) { 255.0 } else { f64::NAN }),
-                        );
+                        selected.extend((0..sn).map(|i| {
+                            if (0..read_bands.len()).any(|b| Some(b) != source_alpha && !values[b * sn + i].is_nan()) {
+                                255.0
+                            } else {
+                                f64::NAN
+                            }
+                        }));
                     } else {
                         let offset = read_bands.binary_search(band).unwrap() * sn;
                         selected.extend_from_slice(&values[offset..offset + sn]);

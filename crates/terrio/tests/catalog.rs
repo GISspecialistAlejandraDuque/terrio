@@ -338,3 +338,23 @@ fn lazy_source_alias_overwrite_never_truncates_source() {
     catalog.into_lazy().write(path.to_str().unwrap(), &Default::default()).unwrap();
     assert_eq!(terrio::open_raster(path.to_str().unwrap()).unwrap().raster.data.to_f64_vec(), vec![10.; 16]);
 }
+
+#[test]
+fn generated_alpha_excludes_a_sources_existing_alpha() {
+    let mut source = tile(0., -9999.);
+    source.driver = terrio::formats::RasterDriver::PNG;
+    source.raster.bands = 2;
+    source.has_nodata = true;
+    source.raster.nodata = -9999.;
+    source.raster.data = RasterData::F64([vec![-9999.; 16], vec![255.; 16]].concat());
+    let mut layer = index();
+    layer.features.truncate(1);
+    let mut catalog = RasterCatalog::from_layer(
+        layer,
+        HashMap::from([("left.tif".into(), source)]),
+        CatalogOptions { bands: Some(3), alpha_band: Some(3), extent: Some((0., 0., 4., 4.)), ..options() },
+    )
+    .unwrap();
+    let alpha = catalog.read_window(Window::new(0, 0, 4, 4), &[3]).unwrap();
+    assert_eq!(alpha.raster.data.to_f64_vec(), vec![0.; 16]);
+}
