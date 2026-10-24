@@ -701,3 +701,7 @@ Catalogs supplied with lazy raster handles retain their storage and read only
 selected source windows. Sharing a handle serializes access to its reader and
 preserves masks, alpha and overviews. Supplied handles remain alive with the catalog;
 the cache limit bounds selected reader handles, not the caller-owned source map.
+
+
+Catalog mask caching retains at most 1 MiB of coverage. Larger mask requests return
+their buffer directly and release the cache instead of retaining and cloning it.

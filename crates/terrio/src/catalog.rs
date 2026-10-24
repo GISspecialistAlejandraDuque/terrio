@@ -13,6 +13,9 @@ use wbraster::raster::RasterData;
 use wbraster::{DataType, Raster, RasterConfig};
 use wbvector::{FieldValue, Layer};
 
+// Keep repeated tile-mask reads cheap without retaining arbitrarily large windows.
+const MASK_CACHE_PIXELS: usize = 1024 * 1024;
+
 /// Options of a raster catalog. Missing output characteristics are inferred from the index
 /// and its first tile. Explicit options override GTI XML and layer metadata.
 #[derive(Debug, Clone, Default)]
@@ -425,6 +428,9 @@ impl RasterCatalog {
         if self.last_mask.as_ref().is_none_or(|(w, _)| *w != window) {
             self.render_window(window, &[], true)?;
         }
+        if window.width.saturating_mul(window.height) > MASK_CACHE_PIXELS {
+            return Ok(self.last_mask.take().unwrap().1);
+        }
         Ok(self.last_mask.as_ref().unwrap().1.clone())
     }
     /// Reads and composites a window; `bands` is 1-based, empty for every band.
@@ -611,7 +617,7 @@ impl RasterCatalog {
         }
         // Dataset coverage is the union of every data band. A subset cannot
         // populate that cache; a later mask request renders the full band set.
-        self.last_mask = (wanted.len() == count).then_some((window, coverage));
+        self.last_mask = (wanted.len() == count && (coverage_only || n <= MASK_CACHE_PIXELS)).then_some((window, coverage));
         // Coverage is a union across data bands, so nodata may require reading
         // every band. Mask-only requests avoid the composite and typed output.
         if coverage_only {
@@ -1067,5 +1073,11 @@ mod lazy_source_tests {
         assert_eq!(catalog.read_window(Window::new(0, 0, 1, 1), &[1]).unwrap().raster.data.to_f64_vec(), vec![7.]);
         assert_eq!(reads.load(Ordering::Relaxed), 1);
         assert_eq!(catalog.stats().source_opens, 1);
+        catalog.header.raster.cols = 2048;
+        catalog.header.raster.rows = 1024;
+        let mask = catalog.read_mask(Window::new(0, 0, 2048, 1024)).unwrap();
+        assert_eq!(mask.len(), 2048 * 1024);
+        assert_eq!(mask.iter().filter(|&&value| value == 255).count(), 32);
+        assert!(catalog.last_mask.is_none());
     }
 }
