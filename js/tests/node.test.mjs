@@ -1187,10 +1187,14 @@ test("openCatalog: selected data band retains the required source alpha", () => 
   for (let band = 0; band < 5; band++) values.fill((band + 1) * 10, band * 16, (band + 1) * 16);
   values.fill(255, 80); values[80] = 0;
   const source = terrio.rasterFromArray(values, 4, 4, [0, 1, 0, 4, 0, -1], "EPSG:4326");
-  const catalog = terrio.openCatalog(index, { source }, { tr: [1, 1], te: [0, 0, 4, 4], bands: 5 });
+  const catalog = terrio.openCatalog(index, { source }, { tr: [1, 1], te: [0, 0, 4, 4], bands: 6, alphaBand: 6 });
   assert.equal(catalog.dtype, "uint8");
   assert.deepEqual([...catalog.readBand(3)], [0, ...Array(15).fill(30)]);
-  catalog.free(); source.free();
+  const untagged = terrio.openCatalog(index, { source }, { tr: [1, 1], te: [0, 0, 4, 4], bands: 5 });
+  source.free();
+  assert.deepEqual([...untagged.readBand(3)], Array(16).fill(30));
+  assert.deepEqual([...catalog.readBand(3)], [0, ...Array(15).fill(30)]);
+  catalog.free(); untagged.free();
 });
 
 test("pansharpen weights, selected bands and unequal resolutions", () => {

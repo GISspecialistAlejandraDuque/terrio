@@ -661,7 +661,7 @@ through ordinary raster APIs too. Indexes are local files; referenced tiles may 
 
 The catalog retains one index reader and parsed schema, queries it spatially for each window,
 opens only selected sources and
-keeps a bounded LRU cache (default 32 datasets). Later feature IDs overwrite earlier ones;
+keeps a bounded LRU cache (default 32 datasets). Later features in composition order overwrite earlier ones;
 `--sort-field FIELD` sorts ascending before composition, and `--sort-descending` reverses it.
 Source nodata, dataset masks and zero alpha are transparent; TIFF/PNG alpha is detected from
 the source, and `--alpha-band` or catalog color-interpretation metadata identifies it otherwise.
@@ -695,3 +695,9 @@ Mosaic bands share one data type and nodata value; per-band nodata/type differen
 GTI SQL/filters, explicit GTI overviews, color-table expansion and rotated GTI output grids are
 not implemented. Compositing uses f64; Int64/UInt64 values beyond 2^53 may lose precision.
 Mark a TIFF alpha band on export with `--co ALPHA=YES` when needed.
+
+
+Catalogs supplied with lazy raster handles retain their storage and read only
+selected source windows. Sharing a handle serializes access to its reader and
+preserves masks, alpha and overviews. Supplied handles remain alive with the catalog;
+the cache limit bounds selected reader handles, not the caller-owned source map.

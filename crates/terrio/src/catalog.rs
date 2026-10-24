@@ -9,7 +9,6 @@ use crate::ops::{Resampling, apply_gt, invert_gt};
 use crate::{Error, RasterDataset, Result, VectorOpenOptions};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use wbraster::raster::RasterData;
 use wbraster::{DataType, Raster, RasterConfig};
 use wbvector::{FieldValue, Layer};
@@ -123,7 +122,7 @@ pub struct RasterCatalog {
     options: CatalogOptions,
     header: RasterDataset,
     cache: VecDeque<(String, LazyRaster, Option<usize>)>,
-    memory: Option<Arc<HashMap<String, RasterDataset>>>,
+    memory: Option<HashMap<String, LazyRaster>>,
     stats: CatalogStats,
     last_mask: Option<(Window, Vec<u8>)>,
     input_paths: Option<Vec<String>>,
@@ -182,6 +181,11 @@ impl RasterCatalog {
     }
     /// Opens an index layer and named source rasters already held in memory, including WASM.
     pub fn from_layer(layer: Layer, sources: HashMap<String, RasterDataset>, options: CatalogOptions) -> Result<Self> {
+        Self::from_lazy_layer(layer, sources.into_iter().map(|(name, raster)| (name, LazyRaster::from(raster))).collect(), options)
+    }
+    /// Opens supplied lazy sources without decoding their pixels. Source handles
+    /// remain alive until the catalog is dropped; only selected windows are read.
+    pub fn from_lazy_layer(layer: Layer, sources: HashMap<String, LazyRaster>, options: CatalogOptions) -> Result<Self> {
         let bounds = extent(&layer);
         let schema = crate::stream::schema_of(&layer);
         let tree = rstar::RTree::bulk_load(
@@ -198,7 +202,7 @@ impl RasterCatalog {
                 })
                 .collect(),
         );
-        Self::initialize(Index::Memory { layer: Box::new(layer), tree }, schema, bounds, PathBuf::new(), options, Some(Arc::new(sources)))
+        Self::initialize(Index::Memory { layer: Box::new(layer), tree }, schema, bounds, PathBuf::new(), options, Some(sources))
     }
     fn initialize(
         index: Index,
@@ -206,7 +210,7 @@ impl RasterCatalog {
         bounds: Option<(f64, f64, f64, f64)>,
         base: PathBuf,
         options: CatalogOptions,
-        memory: Option<Arc<HashMap<String, RasterDataset>>>,
+        memory: Option<HashMap<String, LazyRaster>>,
     ) -> Result<Self> {
         if options.cache_size == Some(0) {
             return Err(Error::InvalidArgument("GTI cache_size must be positive".into()));
@@ -392,28 +396,8 @@ impl RasterCatalog {
             self.cache.push_back(entry);
             self.stats.cache_hits += 1;
         } else {
-            let mut source = if let Some(memory) = &self.memory {
-                let ds = memory.get(location).ok_or_else(|| bad(format!("source '{location}' is missing")))?;
-                let r = &ds.raster;
-                let raster = Raster {
-                    cols: r.cols,
-                    rows: r.rows,
-                    bands: r.bands,
-                    x_min: r.x_min,
-                    y_min: r.y_min,
-                    cell_size_x: r.cell_size_x,
-                    cell_size_y: r.cell_size_y,
-                    nodata: r.nodata,
-                    data_type: r.data_type,
-                    crs: r.crs.clone(),
-                    metadata: r.metadata.clone(),
-                    data: RasterData::new_filled(r.data_type, 0, 0.0),
-                };
-                let mut header = RasterDataset::with_driver(raster, ds.driver, ds.has_nodata);
-                header.affine = ds.affine;
-                header.complex = ds.complex;
-                header.geolocation = ds.geolocation.clone();
-                LazyRaster::from_source(header, Box::new(MemoryTile { datasets: memory.clone(), name: location.into() }))
+            let mut source = if let Some(memory) = &mut self.memory {
+                memory.get_mut(location).ok_or_else(|| bad(format!("source '{location}' is missing")))?.shared()
             } else {
                 let path = if Path::new(location).is_absolute() || location.contains("://") || location.starts_with("/vsi") {
                     location.into()
@@ -916,6 +900,11 @@ impl crate::cog::StreamedSource for CatalogSource {
             return Ok(paths.clone());
         }
         let mut paths = Vec::new();
+        if let Some(sources) = &catalog.memory {
+            for source in sources.values() {
+                paths.extend(source.checked_input_paths()?);
+            }
+        }
         let field = catalog.schema.schema.field_index(catalog.options.location_field.as_deref().unwrap_or("location")).unwrap();
         let mut add = |layer: &Layer| {
             for feature in &layer.features {
@@ -949,22 +938,6 @@ impl crate::cog::StreamedSource for CatalogSource {
     }
     fn read_rows(&self, window: Window, bands: &[usize]) -> Result<RasterData> {
         Ok(self.0.lock().map_err(|_| bad("catalog lock poisoned"))?.read_window(window, bands)?.raster.data)
-    }
-}
-
-struct MemoryTile {
-    datasets: Arc<HashMap<String, RasterDataset>>,
-    name: String,
-}
-impl WindowSource for MemoryTile {
-    fn overviews(&self) -> Vec<(usize, usize)> {
-        Vec::new()
-    }
-    fn read(&mut self, level: usize, window: Window, bands: &[usize]) -> Result<RasterData> {
-        if level != 0 {
-            return Err(bad("in-memory catalog tiles have no overviews"));
-        }
-        Ok(crate::cog::cut(&self.datasets[&self.name].raster, window, bands))
     }
 }
 
@@ -1025,5 +998,74 @@ mod allocation_tests {
     #[test]
     fn oversized_window_buffer_returns_error() {
         assert!(super::filled_buffer(usize::MAX, 0.0f64).is_err());
+    }
+}
+
+#[cfg(test)]
+mod lazy_source_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct Count(Arc<AtomicUsize>);
+    impl WindowSource for Count {
+        fn overviews(&self) -> Vec<(usize, usize)> {
+            Vec::new()
+        }
+        fn read(&mut self, _: usize, window: Window, bands: &[usize]) -> Result<RasterData> {
+            let n = window.width * window.height * bands.len();
+            self.0.fetch_add(n, Ordering::Relaxed);
+            Ok(RasterData::F64(vec![7.; n]))
+        }
+    }
+    #[test]
+    fn supplied_lazy_sources_read_only_selected_windows_and_outlive_handles() {
+        let mut layer = Layer::new("tiles");
+        layer.add_field(wbvector::FieldDef::new("location", wbvector::FieldType::Text));
+        let mut sources = HashMap::new();
+        let reads = Arc::new(AtomicUsize::new(0));
+        for (i, x) in [0., 10.].into_iter().enumerate() {
+            let name = format!("{i}.tif");
+            let header = crate::ops::raster_header(
+                crate::ops::Grid { width: 4, height: 4, geo_transform: [x, 1., 0., 4., 0., -1.] },
+                DataType::F64,
+                1,
+                None,
+                &Default::default(),
+            )
+            .unwrap();
+            let mut original = LazyRaster::from_source(header, Box::new(Count(reads.clone())));
+            sources.insert(name.clone(), original.shared());
+            drop(original);
+            let ring = wbvector::geometry::Ring(vec![
+                wbvector::Coord::xy(x, 0.),
+                wbvector::Coord::xy(x + 4., 0.),
+                wbvector::Coord::xy(x + 4., 4.),
+                wbvector::Coord::xy(x, 4.),
+                wbvector::Coord::xy(x, 0.),
+            ]);
+            let mut feature =
+                wbvector::Feature::with_geometry(i as u64, wbvector::Geometry::Polygon { exterior: ring, interiors: Vec::new() }, 1);
+            feature.attributes[0] = FieldValue::Text(name);
+            layer.push(feature);
+        }
+        let mut catalog = RasterCatalog::from_lazy_layer(
+            layer,
+            sources,
+            CatalogOptions {
+                resolution: Some((1., 1.)),
+                bands: Some(1),
+                data_type: Some(DataType::F64),
+                cache_size: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+        assert_eq!(catalog.read_window(Window::new(0, 0, 1, 1), &[1]).unwrap().raster.data.to_f64_vec(), vec![7.]);
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
+        assert_eq!(catalog.stats().source_opens, 1);
     }
 }

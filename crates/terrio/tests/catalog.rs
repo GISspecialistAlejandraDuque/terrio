@@ -325,3 +325,16 @@ fn optional_metadata_follows_gdal_first_tile_inspection() {
         );
     }
 }
+
+#[test]
+fn lazy_source_alias_overwrite_never_truncates_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("actual-source.tif");
+    terrio::write_raster_dataset(&tile(0., 10.), path.to_str().unwrap(), &Default::default()).unwrap();
+    let mut layer = index();
+    layer.features.truncate(1);
+    let sources = HashMap::from([("left.tif".into(), terrio::open_raster_lazy(path.to_str().unwrap()).unwrap())]);
+    let catalog = RasterCatalog::from_lazy_layer(layer, sources, CatalogOptions { extent: Some((0., 0., 4., 4.)), ..options() }).unwrap();
+    catalog.into_lazy().write(path.to_str().unwrap(), &Default::default()).unwrap();
+    assert_eq!(terrio::open_raster(path.to_str().unwrap()).unwrap().raster.data.to_f64_vec(), vec![10.; 16]);
+}

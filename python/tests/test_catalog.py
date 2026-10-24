@@ -90,10 +90,16 @@ def test_band_subsets_keep_order_duplicates_and_alpha():
     source = terrio.Raster.from_array(
         np.concatenate([values, alpha]), (0, 1, 0, 4, 0, -1), crs="EPSG:4326"
     )
-    catalog = terrio.open_catalog(footprints, {"left": source}, tr=(1, 1), te=(0, 0, 4, 4), bands=5)
+    catalog = terrio.open_catalog(
+        footprints, {"left": source}, tr=(1, 1), te=(0, 0, 4, 4), bands=6, alpha_band=6
+    )
     selected = catalog.read([4, 2, 4])
     assert selected.dtype == np.dtype("uint8")  # GTI defaults to Byte without a tile inspection.
     for output, value in zip(selected, [40, 20, 40], strict=True):
         np.testing.assert_array_equal(output[0], [0, value, value, value])
         np.testing.assert_array_equal(output[1:], np.full((3, 4), value))
     np.testing.assert_array_equal(catalog.read_mask()[0], [0, 255, 255, 255])
+    untagged = terrio.open_catalog(
+        footprints, {"left": source}, tr=(1, 1), te=(0, 0, 4, 4), bands=5
+    )
+    np.testing.assert_array_equal(untagged.read(3), np.full((4, 4), 30))

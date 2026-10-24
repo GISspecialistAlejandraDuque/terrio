@@ -1060,7 +1060,17 @@ pub fn open_catalog(index: JsValue, sources: JsValue, options: JsValue) -> Resul
     let mut rasters = std::collections::HashMap::new();
     for name in js_sys::Object::keys(&js_sys::Object::from(sources.clone())).iter() {
         let value = js_sys::Reflect::get(&sources, &name).map_err(|_| invalid("cannot read catalog source"))?;
-        rasters.insert(name.as_string().ok_or_else(|| invalid("source name must be a string"))?, input_raster(&value)?);
+        let raster = if let Some(inner) = Dataset::lookup(&value) {
+            match &mut *inner.borrow_mut() {
+                Inner::Raster(raster) => raster.shared(),
+                Inner::Vector(..) => return Err(invalid("catalog sources must be rasters")),
+            }
+        } else if let Some((bytes, filename)) = file_bytes(&value) {
+            terrio::memory::open_raster_lazy_bytes(bytes, &filename).map_err(js_err)?
+        } else {
+            return Err(invalid("expected a Dataset or raster bytes"));
+        };
+        rasters.insert(name.as_string().ok_or_else(|| invalid("source name must be a string"))?, raster);
     }
     let options = terrio::catalog::CatalogOptions {
         location_field: a.location_field,
@@ -1077,7 +1087,7 @@ pub fn open_catalog(index: JsValue, sources: JsValue, options: JsValue) -> Resul
         resampling: a.resampling.as_deref().map(Resampling::parse).transpose().map_err(js_err)?,
         ..Default::default()
     };
-    Ok(Dataset::from_lazy(terrio::catalog::RasterCatalog::from_layer(layers.remove(0), rasters, options).map_err(js_err)?.into_lazy()))
+    Ok(Dataset::from_lazy(terrio::catalog::RasterCatalog::from_lazy_layer(layers.remove(0), rasters, options).map_err(js_err)?.into_lazy()))
 }
 
 #[derive(Deserialize)]

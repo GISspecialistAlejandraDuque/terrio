@@ -1419,10 +1419,16 @@ fn open_catalog(
         let mut rasters = std::collections::HashMap::new();
         if let Some(sources) = sources {
             for (name, value) in sources.iter() {
-                rasters.insert(name.extract::<String>()?, input_raster(py, &value)?);
+                let raster = match raster_path(&value)? {
+                    Some(path) => py.detach(|| terrio::open_raster_lazy(&path)).py()?,
+                    None => {
+                        value.cast::<PyRaster>().map_err(|_| invalid("expected a path or a terrio.Raster"))?.borrow_mut().inner.shared()
+                    }
+                };
+                rasters.insert(name.extract::<String>()?, raster);
             }
         }
-        terrio::catalog::RasterCatalog::from_layer(layers.remove(0), rasters, options).py()?
+        terrio::catalog::RasterCatalog::from_lazy_layer(layers.remove(0), rasters, options).py()?
     };
     Ok(PyRaster { inner: catalog.into_lazy() })
 }
