@@ -1152,3 +1152,16 @@ test("openCatalog: lazy windows and z-order with named in-memory sources", () =>
   assert.throws(() => terrio.openCatalog(index, { left }, { cacheSize: 0 }), /positive/);
   catalog.free(); left.free(); right.free();
 });
+
+
+test("openCatalog: selected data band retains the required source alpha", () => {
+  const index = { type: "FeatureCollection", features: [{ type: "Feature", properties: { location: "source" },
+    geometry: { type: "Polygon", coordinates: [[[0, 0], [4, 0], [4, 4], [0, 4], [0, 0]]] } }] };
+  const values = new Float64Array(96);
+  for (let band = 0; band < 5; band++) values.fill((band + 1) * 10, band * 16, (band + 1) * 16);
+  values.fill(255, 80); values[80] = 0;
+  const source = terrio.rasterFromArray(values, 4, 4, [0, 1, 0, 4, 0, -1], "EPSG:4326");
+  const catalog = terrio.openCatalog(index, { source }, { tr: [1, 1], te: [0, 0, 4, 4], bands: 5 });
+  assert.deepEqual([...catalog.readBand(3)], [0, ...Array(15).fill(30)]);
+  catalog.free(); source.free();
+});

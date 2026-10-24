@@ -208,3 +208,81 @@ fn failed_source_inventory_never_truncates_the_destination() {
     let second = terrio::open_raster(second.to_str().unwrap()).unwrap();
     assert_eq!(first.raster.band_view(0).as_slice(), second.raster.band_view(0).as_slice());
 }
+
+#[test]
+fn requested_bands_limit_reads_and_preserve_order_and_duplicates() {
+    let mut source = tile(0.0, 0.0);
+    source.raster.bands = 5;
+    source.raster.data = RasterData::F64((1..=5).flat_map(|b| vec![b as f64 * 10.0; 16]).collect());
+    let mut footprints = index();
+    footprints.features.truncate(1);
+    let mut catalog = RasterCatalog::from_layer(
+        footprints,
+        HashMap::from([("left.tif".into(), source)]),
+        CatalogOptions { bands: Some(5), extent: Some((0., 0., 4., 4.)), ..options() },
+    )
+    .unwrap();
+    let window = Window::new(0, 0, 4, 4);
+    let selected = catalog.read_window(window, &[4, 2, 4]).unwrap();
+    for (band, value) in [40.0, 20.0, 40.0].into_iter().enumerate() {
+        assert_eq!(selected.raster.band_view(band).as_slice(), &[value; 16]);
+    }
+    assert_eq!(catalog.stats().source_pixels, 32);
+    assert_eq!(catalog.stats().warped_pixels, 32);
+    assert_eq!(catalog.read_mask(window).unwrap(), vec![255; 16]);
+}
+
+#[test]
+fn selected_data_reads_only_itself_and_the_extra_source_alpha() {
+    let mut source = tile(0.0, 0.0);
+    source.raster.bands = 6;
+    let mut values: Vec<f64> = (1..=5).flat_map(|b| vec![b as f64 * 10.0; 16]).collect();
+    values.extend([0.0].into_iter().chain([255.0; 15]));
+    source.raster.data = RasterData::F64(values);
+    let mut footprints = index();
+    footprints.features.truncate(1);
+    let mut catalog = RasterCatalog::from_layer(
+        footprints,
+        HashMap::from([("left.tif".into(), source)]),
+        CatalogOptions { bands: Some(5), extent: Some((0., 0., 4., 4.)), ..options() },
+    )
+    .unwrap();
+    let window = Window::new(0, 0, 4, 4);
+    let selected = catalog.read_window(window, &[3]).unwrap();
+    assert_eq!(selected.raster.band_view(0).as_slice()[0], 0.0);
+    assert_eq!(&selected.raster.band_view(0).as_slice()[1..], &[30.0; 15]);
+    assert_eq!(catalog.stats().source_pixels, 32);
+    assert_eq!(catalog.stats().warped_pixels, 16);
+    assert_eq!(catalog.read_mask(window).unwrap(), [vec![0], vec![255; 15]].concat());
+}
+
+#[test]
+fn subset_reads_defer_full_coverage_and_generated_alpha_uses_all_data() {
+    let mut source = tile(0.0, -9999.0);
+    source.raster.bands = 2;
+    source.has_nodata = true;
+    source.raster.nodata = -9999.0;
+    let mut values = vec![-9999.0; 32];
+    values[1] = 10.0;
+    values[16] = 20.0;
+    source.raster.data = RasterData::F64(values);
+    let mut footprints = index();
+    footprints.features.truncate(1);
+    let mut catalog = RasterCatalog::from_layer(
+        footprints,
+        HashMap::from([("left.tif".into(), source)]),
+        CatalogOptions { bands: Some(3), alpha_band: Some(3), extent: Some((0., 0., 4., 4.)), ..options() },
+    )
+    .unwrap();
+    let window = Window::new(0, 0, 4, 4);
+    let selected = catalog.read_window(window, &[1]).unwrap();
+    assert_eq!(selected.raster.band_view(0).as_slice()[1], 10.0);
+    assert_eq!(catalog.stats().source_pixels, 16);
+    let mask = catalog.read_mask(window).unwrap();
+    assert_eq!(mask, [vec![255; 2], vec![0; 14]].concat());
+    let before = catalog.stats();
+    let alpha = catalog.read_window(window, &[3]).unwrap();
+    assert_eq!(alpha.raster.band_view(0).as_slice(), &[vec![255.0; 2], vec![0.0; 14]].concat());
+    assert_eq!(catalog.stats().source_pixels - before.source_pixels, 32);
+    assert_eq!(catalog.stats().warped_pixels - before.warped_pixels, 16);
+}

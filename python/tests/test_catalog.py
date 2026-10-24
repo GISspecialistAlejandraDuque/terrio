@@ -79,3 +79,20 @@ def test_named_layer_in_memory_index(tmp_path):
             ot="Float32",
         )
         np.testing.assert_array_equal(catalog.read(1, window=(0, 0, 1, 1)), [[10]])
+
+
+def test_band_subsets_keep_order_duplicates_and_alpha():
+    footprints = index()
+    footprints["features"] = footprints["features"][:1]
+    values = np.stack([np.full((4, 4), band * 10, dtype="float64") for band in range(1, 6)])
+    alpha = np.full((1, 4, 4), 255, dtype="float64")
+    alpha[0, 0, 0] = 0
+    source = terrio.Raster.from_array(
+        np.concatenate([values, alpha]), (0, 1, 0, 4, 0, -1), crs="EPSG:4326"
+    )
+    catalog = terrio.open_catalog(footprints, {"left": source}, tr=(1, 1), te=(0, 0, 4, 4), bands=5)
+    selected = catalog.read([4, 2, 4])
+    for output, value in zip(selected, [40, 20, 40], strict=True):
+        np.testing.assert_array_equal(output[0], [0, value, value, value])
+        np.testing.assert_array_equal(output[1:], np.full((3, 4), value))
+    np.testing.assert_array_equal(catalog.read_mask()[0], [0, 255, 255, 255])

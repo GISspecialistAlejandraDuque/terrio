@@ -176,11 +176,19 @@ def main():
                 layer.CreateFeature(feature)
             ds = None
 
-        def check(name, index, alpha=False):
+        def check(name, index, alpha=False, bands=None):
             reference = str(directory / "reference.tif")
             actual = str(directory / "actual.tif")
-            gdal.Translate(reference, gdal.Open(str(index)))
+            gdal.Translate(
+                reference,
+                gdal.Open(str(index)),
+                **({"bandList": bands} if bands else {}),
+            )
             command = [args.terrio, "catalog", str(index), actual]
+            if bands:
+                command = [args.terrio, "translate", str(index), actual]
+                for band in bands:
+                    command += ["-b", str(band)]
             if alpha:
                 command += ["--co", "ALPHA=YES"]
             proc = subprocess.run(command, capture_output=True, text=True)
@@ -225,6 +233,13 @@ def main():
                     spectral=variant == "spectral",
                 )
                 check(f"GTI {extension} {variant}", index, alpha=variant == "alpha")
+                if variant in ["alpha", "spectral"]:
+                    band = 1 if variant == "alpha" else 2
+                    check(
+                        f"GTI {extension} {variant} selected band {band}",
+                        index,
+                        bands=[band],
+                    )
             # Terrio-written indexes cross-read by GDAL. Explicit GTI XML supplies mosaic
             # characteristics, since a generic vector conversion does not retain layer metadata.
             geojson = directory / "tiles.geojson"
@@ -380,7 +395,9 @@ def main():
                 or not stats.get("http_bytes")
                 or stats.get("peak_cached_sources") != 1
             ):
-                result["error"] = (proc.stderr if proc.returncode else "") or f"unexpected I/O counters: {stats}"
+                result["error"] = (
+                    proc.stderr if proc.returncode else ""
+                ) or f"unexpected I/O counters: {stats}"
             results.append(result)
         finally:
             server.shutdown()

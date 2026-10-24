@@ -446,6 +446,9 @@ impl RasterCatalog {
         if bands.iter().any(|b| *b == 0 || *b > self.header.raster.bands) {
             return Err(bad("band is out of range"));
         }
+        let mut wanted = bands.clone();
+        wanted.sort_unstable();
+        wanted.dedup();
         let gt = self.header.geo_transform();
         let origin = apply_gt(&gt, window.x as f64, window.y as f64);
         let dst_gt = [origin.0, gt[1], 0.0, origin.1, 0.0, gt[5]];
@@ -455,7 +458,7 @@ impl RasterCatalog {
         let count = self.header.raster.bands;
         let alpha = self.options.alpha_band;
         let n = window.width.checked_mul(window.height).ok_or_else(|| bad("window dimensions overflow"))?;
-        let total = n.checked_mul(count).ok_or_else(|| bad("window band count overflows"))?;
+        let total = n.checked_mul(wanted.len()).ok_or_else(|| bad("window band count overflows"))?;
         let elements = n.checked_mul(bands.len()).ok_or_else(|| bad("selected bands overflow the window"))?;
         let mut coverage = vec![0u8; n];
         let fill = self.header.nodata().unwrap_or(0.0);
@@ -523,15 +526,27 @@ impl RasterCatalog {
             }
             let src_window = Window::new(x0, y0, x1 - x0, y1 - y0);
             let mask = if tile.has_mask() { tile.read_mask(src_window, None)? } else { None };
-            let mut source = tile.read_window(src_window, &WindowOptions::default())?;
-            let sn = src_window.width * src_window.height;
-            let read_bands = source.raster.bands;
-            let mut source_bands = read_bands;
+            let source_bands = tile.band_count();
             if source_bands != count && source_bands != count + 1 && !(alpha == Some(count) && source_bands + 1 == count) {
                 return Err(bad("tile bands must match catalog, optionally with one extra alpha band"));
             }
             let source_alpha =
                 if source_bands == count + 1 { Some(source_bands) } else { detected_alpha.or(alpha).filter(|b| *b <= source_bands) };
+            let generated_alpha = source_bands + 1 == count && wanted.contains(&count);
+            let mut read_bands = wanted.iter().copied().filter(|b| *b <= source_bands).collect::<Vec<_>>();
+            if let Some(alpha) = source_alpha {
+                read_bands.push(alpha);
+            }
+            // Synthesizing alpha requires validity of all data bands. Ordinary subset
+            // reads need only their requested samples and the source alpha/mask.
+            if generated_alpha {
+                read_bands.extend(1..=source_bands);
+            }
+            read_bands.sort_unstable();
+            read_bands.dedup();
+            let source_alpha = source_alpha.and_then(|b| read_bands.binary_search(&b).ok());
+            let mut source = tile.read_window(src_window, &WindowOptions { bands: read_bands.clone(), ..Default::default() })?;
+            let sn = src_window.width * src_window.height;
             let data = std::mem::replace(&mut source.raster.data, RasterData::F64(Vec::new()));
             #[allow(clippy::unnecessary_cast)]
             let mut values = match data {
@@ -539,28 +554,37 @@ impl RasterCatalog {
                 data => crate::pixel::with_data!(&data, values => values.iter().map(|&v|v as f64).collect::<Vec<f64>>()),
             };
             for i in 0..sn {
-                let invalid = mask.as_ref().is_some_and(|m| m[i] == 0) || source_alpha.is_some_and(|b| values[(b - 1) * sn + i] == 0.0);
-                for b in 0..source_bands {
+                let invalid = mask.as_ref().is_some_and(|m| m[i] == 0) || source_alpha.is_some_and(|b| values[b * sn + i] == 0.0);
+                for b in 0..read_bands.len() {
                     let value = &mut values[b * sn + i];
                     if invalid || source.nodata().is_some_and(|nd| crate::ops::is_nodata(*value, nd)) {
                         *value = f64::NAN;
                     }
                 }
             }
-            if source_bands + 1 == count {
-                let alpha = (0..sn)
-                    .map(|i| if (0..source_bands).any(|b| !values[b * sn + i].is_nan()) { 255.0 } else { f64::NAN })
-                    .collect::<Vec<_>>();
-                values.extend(alpha);
-                source_bands += 1;
-                source.raster.bands = source_bands;
-            }
+            let values = if read_bands == wanted {
+                values
+            } else {
+                let mut selected = Vec::with_capacity(sn * wanted.len());
+                for band in &wanted {
+                    if generated_alpha && *band == count {
+                        selected.extend(
+                            (0..sn).map(|i| if (0..read_bands.len()).any(|b| !values[b * sn + i].is_nan()) { 255.0 } else { f64::NAN }),
+                        );
+                    } else {
+                        let offset = read_bands.binary_search(band).unwrap() * sn;
+                        selected.extend_from_slice(&values[offset..offset + sn]);
+                    }
+                }
+                selected
+            };
+            source.raster.bands = wanted.len();
             source.raster.data = RasterData::F64(values);
             source.raster.data_type = DataType::F64;
             source.raster.nodata = f64::NAN;
             source.has_nodata = true;
-            self.stats.source_pixels += sn * read_bands;
-            self.stats.warped_pixels += cw * ch * count;
+            self.stats.source_pixels += sn * read_bands.len();
+            self.stats.warped_pixels += cw * ch * wanted.len();
             let warped = crate::ops::warp::warp(
                 &[&source],
                 &WarpOptions {
@@ -575,24 +599,27 @@ impl RasterCatalog {
                     ..Default::default()
                 },
             )?;
-            for b in 0..count {
+            for (b, band) in wanted.iter().enumerate() {
                 for (k, value) in warped.raster.band_view(b).as_slice().iter().copied().enumerate() {
                     let i = (cy0 + k / cw) * window.width + cx0 + k % cw;
                     if !value.is_nan() {
                         out[b * n + i] = value;
-                        if alpha != Some(b + 1) {
+                        if alpha != Some(*band) {
                             coverage[i] = 255;
                         }
                     }
                 }
             }
         }
-        self.last_mask = Some((window, coverage));
+        // Dataset coverage is the union of every data band. A subset cannot
+        // populate that cache; a later mask request renders the full band set.
+        self.last_mask = (wanted.len() == count).then_some((window, coverage));
         let mut data = RasterData::new_filled(self.header.raster.data_type, elements, 0.0);
         crate::pixel::with_data!(&mut data, v => {
             for (dst, band) in bands.iter().enumerate() {
+                let source = wanted.binary_search(band).unwrap();
                 for i in 0..n {
-                    v[dst*n+i] = crate::ops::warp_round(out[(band-1)*n+i], self.header.raster.data_type) as _;
+                    v[dst*n+i] = crate::ops::warp_round(out[source*n+i], self.header.raster.data_type) as _;
                 }
             }
         });

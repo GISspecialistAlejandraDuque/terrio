@@ -619,7 +619,10 @@ missing resolution, band count and type are inferred from one tile. GeoTIFF/COG 
 lazy; other formats follow their existing readers. Complete metadata opens zero tiles at startup.
 `--stats` with `--window` reports persistent index reader opens/queries, logical source opens,
 cache hits, selected features, source pixels (excluding separate mask samples), warped destination
-samples and peak cached datasets. Each tile is warped only over its intersection with the request. Whole mosaics write in strips.
+samples and peak cached datasets. Each tile is warped only over its intersection with the request.
+Band-subset reads (including `translate -b`) load and warp only requested bands plus source alpha.
+Generating output alpha needs validity from all source data bands; a separate dataset-mask request
+likewise computes coverage from every data band. Whole mosaics write in strips.
 
 The supported GTI subset includes `IndexDataset`, `IndexLayer`, `LocationField`, sort order,
 SRS, resolution, extent, band count/type/nodata and alpha color interpretation. Tile sources
