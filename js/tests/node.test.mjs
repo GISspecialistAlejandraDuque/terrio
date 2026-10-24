@@ -1188,6 +1188,7 @@ test("openCatalog: selected data band retains the required source alpha", () => 
   values.fill(255, 80); values[80] = 0;
   const source = terrio.rasterFromArray(values, 4, 4, [0, 1, 0, 4, 0, -1], "EPSG:4326");
   const catalog = terrio.openCatalog(index, { source }, { tr: [1, 1], te: [0, 0, 4, 4], bands: 5 });
+  assert.equal(catalog.dtype, "uint8");
   assert.deepEqual([...catalog.readBand(3)], [0, ...Array(15).fill(30)]);
   catalog.free(); source.free();
 });

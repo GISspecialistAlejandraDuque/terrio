@@ -34,7 +34,7 @@ pub struct CatalogOptions {
     pub srs: Option<SpatialRef>,
     /// Number of output bands.
     pub bands: Option<usize>,
-    /// Output type.
+    /// Output type: inferred with required tile metadata, otherwise Byte.
     pub data_type: Option<DataType>,
     /// Output nodata (zero fill without one).
     pub nodata: Option<f64>,
@@ -247,7 +247,7 @@ impl RasterCatalog {
             last_mask: None,
             input_paths: None,
         };
-        let needs_first = catalog.options.resolution.is_none() || catalog.options.bands.is_none() || catalog.options.data_type.is_none();
+        let needs_first = catalog.options.resolution.is_none() || catalog.options.bands.is_none();
         let first = if needs_first {
             let layer = match &mut catalog.index {
                 Index::Memory { layer, .. } => {
@@ -297,12 +297,15 @@ impl RasterCatalog {
         }
         let (width, height) = (width as usize, height as usize);
         let bands = catalog.options.bands.or(first.as_ref().map(|f| f.4)).unwrap();
-        let data_type = catalog.options.data_type.or(first.as_ref().map(|f| f.5)).unwrap();
+        let data_type = catalog.options.data_type.or(first.as_ref().map(|f| f.5)).unwrap_or(DataType::U8);
         if bands == 0 || catalog.options.alpha_band.is_some_and(|b| b == 0 || b > bands) {
             return Err(bad("invalid band count or alpha band"));
         }
+        // GDAL inspects a tile only when resolution or band count is missing.
+        // Optional type/nodata/alpha can then be inherited; otherwise type defaults
+        // to Byte and output validity characteristics require catalog metadata.
         if catalog.options.alpha_band.is_none() {
-            catalog.options.alpha_band = first.as_ref().and_then(|f| f.7);
+            catalog.options.alpha_band = first.as_ref().and_then(|f| f.7).filter(|band| *band <= bands);
         }
         let nodata = catalog.options.nodata.or(first.and_then(|f| f.6));
         let raster = Raster {
@@ -338,39 +341,42 @@ impl RasterCatalog {
     }
     fn select(&mut self, bounds: Option<(f64, f64, f64, f64)>) -> Result<Vec<Entry>> {
         self.stats.index_queries += 1;
-        let layers = match &mut self.index {
-            Index::File { reader, .. } => vec![reader.query(bounds)?],
-            Index::Memory { layer, tree } => {
-                let mut selected = crate::stream::schema_of(layer);
-                selected.features = if let Some(b) = bounds {
-                    tree.locate_in_envelope_intersecting(&rstar::AABB::from_corners([b.0, b.1], [b.2, b.3]))
-                        .map(|cell| layer.features[cell.feature].clone())
-                        .collect()
-                } else {
-                    layer.features.clone()
-                };
-                vec![selected]
-            }
-        };
         let location = self.schema.schema.field_index(self.options.location_field.as_deref().unwrap_or("location")).unwrap();
         let sort = self.options.sort_field.as_ref().and_then(|name| self.schema.schema.field_index(name));
         let mut rows = Vec::new();
-        for layer in layers {
-            for feature in layer.features {
-                if let Some(bounds) = bounds
-                    && !feature.geometry.as_ref().is_some_and(|g| {
-                        g.bbox().is_some_and(|b| b.min_x < bounds.2 && b.max_x > bounds.0 && b.min_y < bounds.3 && b.max_y > bounds.1)
-                    })
-                {
-                    continue;
+        let mut add = |feature: &wbvector::Feature| -> Result<()> {
+            if let Some(bounds) = bounds
+                && !feature.geometry.as_ref().is_some_and(|g| {
+                    g.bbox().is_some_and(|b| b.min_x < bounds.2 && b.max_x > bounds.0 && b.min_y < bounds.3 && b.max_y > bounds.1)
+                })
+            {
+                return Ok(());
+            }
+            let path =
+                feature.attributes.get(location).and_then(FieldValue::as_str).ok_or_else(|| bad("tile location must be a string"))?;
+            rows.push(Entry {
+                location: path.into(),
+                order: sort.and_then(|i| feature.attributes.get(i)).cloned().unwrap_or(FieldValue::Null),
+                fid: feature.fid,
+            });
+            Ok(())
+        };
+        match &mut self.index {
+            Index::File { reader, .. } => {
+                for feature in reader.query(bounds)?.features {
+                    add(&feature)?;
                 }
-                let path =
-                    feature.attributes.get(location).and_then(FieldValue::as_str).ok_or_else(|| bad("tile location must be a string"))?;
-                rows.push(Entry {
-                    location: path.into(),
-                    order: sort.and_then(|i| feature.attributes.get(i)).cloned().unwrap_or(FieldValue::Null),
-                    fid: feature.fid,
-                });
+            }
+            Index::Memory { layer, tree } => {
+                if let Some(b) = bounds {
+                    for cell in tree.locate_in_envelope_intersecting(&rstar::AABB::from_corners([b.0, b.1], [b.2, b.3])) {
+                        add(&layer.features[cell.feature])?;
+                    }
+                } else {
+                    for feature in &layer.features {
+                        add(feature)?;
+                    }
+                }
             }
         }
         rows.sort_by(|a, b| {

@@ -92,6 +92,7 @@ def test_band_subsets_keep_order_duplicates_and_alpha():
     )
     catalog = terrio.open_catalog(footprints, {"left": source}, tr=(1, 1), te=(0, 0, 4, 4), bands=5)
     selected = catalog.read([4, 2, 4])
+    assert selected.dtype == np.dtype("uint8")  # GTI defaults to Byte without a tile inspection.
     for output, value in zip(selected, [40, 20, 40], strict=True):
         np.testing.assert_array_equal(output[0], [0, value, value, value])
         np.testing.assert_array_equal(output[1:], np.full((3, 4), value))

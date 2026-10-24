@@ -637,8 +637,11 @@ Nonzero alpha copies source values without blending. Mixed source CRSs are repro
 `--layer`, `--location-field`, `--sort-field`, `--tr X Y`, `--te XMIN YMIN XMAX YMAX`,
 `--srs`, `--band-count`, `--ot`, `--nodata`, `--alpha-band`, `--cache-size` and `-r`
 override catalog characteristics. GTI layer metadata and XML supply their equivalents;
-missing resolution, band count and type are inferred from one tile. GeoTIFF/COG pixels stay
+missing resolution or band count requires inspecting one tile. GeoTIFF/COG pixels stay
 lazy; other formats follow their existing readers. Complete metadata opens zero tiles at startup.
+When a tile is inspected, its type and optional nodata/alpha can also be inferred. Otherwise,
+output type defaults to Byte and output nodata/alpha comes from catalog metadata or explicit
+options. Source nodata/alpha always controls tile validity when pixels are requested.
 `--stats` with `--window` reports persistent index reader opens/queries, logical source opens,
 cache hits, selected features, source pixels (excluding separate mask samples), warped destination
 samples and peak cached datasets. Each tile is warped only over its intersection with the request.

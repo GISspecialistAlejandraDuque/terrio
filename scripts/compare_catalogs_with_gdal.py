@@ -22,6 +22,12 @@ gdal.UseExceptions()
 ogr.UseExceptions()
 
 
+def nodata_equal(left, right):
+    return left == right or (
+        left is not None and right is not None and np.isnan(left) and np.isnan(right)
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("data", type=Path)
@@ -119,6 +125,9 @@ def main():
             spectral=False,
             declare_alpha=True,
             grid_size=False,
+            declare_nodata=True,
+            infer_type=False,
+            infer_resolution=False,
         ):
             ds = ogr.GetDriverByName(driver).CreateDataSource(str(path))
             layer = ds.CreateLayer("tiles", srs, ogr.wkbPolygon)
@@ -136,10 +145,21 @@ def main():
                 "MAXX": str(bounds[2]),
                 "MAXY": str(bounds[3]),
             }
+            if not declare_nodata:
+                metadata.pop("NODATA")
+            if infer_type:
+                metadata.pop("DATA_TYPE")
+            if infer_resolution:
+                metadata.pop("RESX")
+                metadata.pop("RESY")
             if grid_size:
                 metadata.pop("RESX")
                 metadata.pop("RESY")
-                metadata.update(XSIZE="96", YSIZE="64", GEOTRANSFORM=f"{bounds[0]},2,0,{bounds[3]},0,-2")
+                metadata.update(
+                    XSIZE="96",
+                    YSIZE="64",
+                    GEOTRANSFORM=f"{bounds[0]},2,0,{bounds[3]},0,-2",
+                )
             if alpha and declare_alpha:
                 metadata["COLOR_INTERPRETATION"] = "gray,alpha"
             layer.SetMetadata(metadata)
@@ -215,8 +235,17 @@ def main():
                 )
                 for b in range(1, ref_ds.RasterCount + 1)
             )
-            result.update(same_color_interpretation=same_roles, same_masks=same_masks)
-            if not same_roles or not same_masks:
+            same_nodata = all(
+                ref_ds.GetRasterBand(b).GetNoDataValue()
+                == actual_ds.GetRasterBand(b).GetNoDataValue()
+                for b in range(1, ref_ds.RasterCount + 1)
+            )
+            result.update(
+                same_color_interpretation=same_roles,
+                same_masks=same_masks,
+                same_nodata=same_nodata,
+            )
+            if not same_roles or not same_masks or not same_nodata:
                 result["error"] = "color interpretation or validity masks differ"
             results.append(result)
 
@@ -245,6 +274,27 @@ def main():
                         index,
                         bands=[band],
                     )
+            for infer_type, infer_resolution in [
+                (False, False),
+                (True, False),
+                (False, True),
+            ]:
+                optional = (
+                    directory
+                    / f"no-nodata-{infer_type}-{infer_resolution}-{extension}.gti.{extension}"
+                )
+                write_index(
+                    optional,
+                    driver,
+                    "nodata.tif",
+                    declare_nodata=False,
+                    infer_type=infer_type,
+                    infer_resolution=infer_resolution,
+                )
+                check(
+                    f"GTI {extension} optional metadata (infer type={infer_type}, resolution={infer_resolution})",
+                    optional,
+                )
             size_index = directory / f"size-{extension}.gti.{extension}"
             write_index(size_index, driver, "right.tif", grid_size=True)
             check(f"GTI {extension} XSIZE/YSIZE metadata", size_index)

@@ -286,3 +286,34 @@ fn subset_reads_defer_full_coverage_and_generated_alpha_uses_all_data() {
     assert_eq!(catalog.stats().source_pixels - before.source_pixels, 32);
     assert_eq!(catalog.stats().warped_pixels - before.warped_pixels, 16);
 }
+
+#[test]
+fn optional_metadata_follows_gdal_first_tile_inspection() {
+    let mut source = tile(0., 10.);
+    source.has_nodata = true;
+    source.raster.nodata = -9999.;
+    if let RasterData::F64(values) = &mut source.raster.data {
+        values[0] = -9999.;
+    }
+    let mut footprints = index();
+    footprints.features.truncate(1);
+    for (resolution, data_type, expected_type, expected_nodata, opens) in [
+        (Some((1., 1.)), None, DataType::U8, None, 0),
+        (Some((1., 1.)), Some(DataType::F64), DataType::F64, None, 0),
+        (None, None, DataType::F64, Some(-9999.), 1),
+    ] {
+        let mut catalog = RasterCatalog::from_layer(
+            footprints.clone(),
+            HashMap::from([("left.tif".into(), source.clone())]),
+            CatalogOptions { resolution, data_type, extent: Some((0., 0., 4., 4.)), ..options() },
+        )
+        .unwrap();
+        assert_eq!(catalog.header().nodata(), expected_nodata);
+        assert_eq!(catalog.header().raster.data_type, expected_type);
+        assert_eq!(catalog.stats().source_opens, opens);
+        assert_eq!(
+            catalog.read_window(Window::new(0, 0, 1, 1), &[]).unwrap().raster.band_view(0).as_slice(),
+            &[expected_nodata.unwrap_or(0.)]
+        );
+    }
+}

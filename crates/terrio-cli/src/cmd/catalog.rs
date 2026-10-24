@@ -32,10 +32,10 @@ pub struct Args {
     /// Number of output bands (default from the first tile).
     #[arg(long)]
     band_count: Option<usize>,
-    /// Output data type (default from the first tile).
+    /// Output data type (from an inspected tile; otherwise Byte).
     #[arg(long)]
     ot: Option<String>,
-    /// Output nodata, allowing NaN (default from the first tile).
+    /// Output nodata, allowing NaN (catalog metadata or an inspected tile; otherwise zero fill).
     #[arg(long, allow_hyphen_values = true)]
     nodata: Option<f64>,
     /// An output alpha band, numbered from 1; zero alpha masks the source.
