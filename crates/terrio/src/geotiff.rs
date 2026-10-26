@@ -257,8 +257,15 @@ pub(crate) fn read_geo_tags_from<R: Read + Seek>(mut f: R) -> Option<GeoTags> {
         for item in crate::drivers::gtiff_write::gdal_metadata_items(xml) {
             let Some(i) = item.attr("sample").and_then(|s| s.parse::<usize>().ok()) else { continue };
             let Some(band) = out.band_properties.get_mut(i) else { continue };
-            if item.attr("role") == Some("colorinterp") && item.attr("domain").is_none() {
-                band.color_interp = Some(color_interpretation(&item.text).into());
+            if item.attr("domain").is_some() {
+                continue;
+            }
+            match item.attr("role") {
+                Some("colorinterp") => band.color_interp = Some(color_interpretation(&item.text).into()),
+                // GDAL's band scale and offset (`gdal raster unscale` applies them).
+                Some("scale") => band.scale = item.text.trim().parse().ok(),
+                Some("offset") => band.offset = item.text.trim().parse().ok(),
+                _ => {}
             }
         }
     }
