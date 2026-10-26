@@ -942,7 +942,11 @@ pub fn read_rpc(path: &str) -> Result<Option<Rpc>> {
     if let Some(tag) = crate::geotiff::read_geo_tags(local.path()).and_then(|t| t.rpc) {
         return Rpc::from_tiff_tag(&tag).map(Some);
     }
-    let p = local.path();
+    rpc_sidecar(local.path())
+}
+
+/// The RPCs of the `_RPC.TXT` or `.RPB` sidecar of a local file, when it has one.
+pub(crate) fn rpc_sidecar(p: &std::path::Path) -> Result<Option<Rpc>> {
     let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else { return Ok(None) };
     let dir = p.parent().unwrap_or(std::path::Path::new(""));
     for side in [format!("{stem}_rpc.txt"), format!("{stem}_RPC.TXT"), format!("{stem}.RPB"), format!("{stem}.rpb")] {

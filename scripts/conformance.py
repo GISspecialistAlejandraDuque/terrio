@@ -934,6 +934,29 @@ def suite_geocentric(ctx):
     return suite
 
 
+def suite_lazy_geotiff(ctx):
+    """Pinned GDAL metadata, sample and external-overview regressions through Rust."""
+    suite = Suite("lazy-geotiff", "Lazy GeoTIFF metadata and external overviews", "GDAL",
+                  "Frozen GDAL reference checks: sample bits, nodata, band properties, RPCs, "
+                  "file lists and external overview dimensions, values and masks. Exact assertions; "
+                  "this suite does not regenerate reference files with the installed GDAL.")
+    if not shutil.which("cargo"):
+        suite.skipped = "needs cargo"
+        return suite
+    tests = ["external_overviews", "geotiff_nodata", "geotiff_band_metadata",
+             "lazy_rpc", "lazy_sample_bits", "file_list"]
+    command = ["cargo", "test", "--release", "-p", "terrio"]
+    for test in tests:
+        command += ["--test", test]
+    code, out, err = run(command, {"TERRIO_TEST_DATA": os.path.abspath(ctx.data)})
+    for name, result in re.findall(r"^test (\S+) \.\.\. (ok|FAILED)$", out, re.MULTILINE):
+        suite.cases.append(Case("GeoTIFF", name, IDENTICAL if result == "ok" else DIFFERS,
+                                "Pinned reference assertions passed" if result == "ok" else tail(out)))
+    if not suite.cases or (code and not any(case.status == DIFFERS for case in suite.cases)):
+        suite.error = tail(err or out)
+    return suite
+
+
 def suite_crs(ctx):
     """Every EPSG CRS's transformations against GDAL's (crates/terrio-crs/tests/epsg_accuracy.rs)."""
     s = Suite(
@@ -1413,6 +1436,7 @@ SUITES = OrderedDict(
         ("tiles", suite_tiles),
         ("grib", suite_grib),
         ("pointclouds", suite_pointclouds),
+        ("lazy-geotiff", suite_lazy_geotiff),
         ("crs", suite_crs),
         ("geocentric", suite_geocentric),
         ("perspective", suite_perspective),

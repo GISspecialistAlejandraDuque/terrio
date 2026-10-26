@@ -82,10 +82,11 @@ gdal-sys = { workspace = true, optional = true }
 # Every driver is on by default. A build with `default-features = false` keeps the core: GeoTIFF
 # and COG (deflate, LZW, PackBits, ZSTD, WebP, JPEG, JPEG XL), the raw and ASCII rasters (AAIGrid,
 # EHdr, ENVI, ERS, HFA, RST, SAGA, GSBG, XYZ...), PNG, JPEG, VRT, GeoJSON, Shapefile, KML/KMZ,
-# GML, GPX, CSV, MapInfo, the CRS engine and the operations. Disabled drivers stay in the API
-# (`RasterDriver`, `VectorDriver`) and fail with "built without the `...` feature".
+# GML, GPX, CSV, MapInfo, the CRS engine and the operations, without C (Zstandard with `ruzstd`).
+# Disabled drivers stay in the API (`RasterDriver`, `VectorDriver`) and fail with "built without
+# the `...` feature".
 [features]
-default = ["cad", "geotiff", "parquet", "remote", "avif", "netcdf-hdf5", "osm", "lzma", "flatgeobuf", "jp2", "lerc", "pointcloud", "tiles", "zarr", "sqlite", "grib"]
+default = ["cad", "geotiff", "parquet", "remote", "avif", "netcdf-hdf5", "osm", "lzma", "flatgeobuf", "jp2", "lerc", "pointcloud", "tiles", "zarr", "sqlite", "grib", "libzstd"]
 ## GeoTIFF and COG reading and writing. Always built (it is the core): the feature exists so that
 ## `features = ["geotiff"]` states what a build needs.
 geotiff = []
@@ -119,15 +120,19 @@ tiles = ["sqlite"]
 zarr = ["dep:lz4_flex"]
 ## GeoPackage (vector and raster tiles), SQLite/SpatiaLite and the SQLite store of MBTiles.
 sqlite = []
+## Zstandard (GeoTIFF and EPT tiles) with the zstd C library, natively: it decodes faster and
+## compresses better than `ruzstd`, used without it and in WebAssembly, which writes at its fastest
+## level (about zstd's 1) whatever level is asked for. Without it, natively, ZSTD GeoTIFFs whose
+## samples only the `tiff` crate decodes (Float16, 1 to 7 bits, WhiteIsZero) are not read, as in
+## WebAssembly. In WebAssembly it compiles the C library (as `parquet` does) but does not use it.
+libzstd = ["dep:zstd", "tiff/zstd", "terrio-crs/libzstd"]
 ## Open any format GDAL reads, through the same data model, when terrio has no driver for it.
 gdal = ["dep:gdal", "dep:gdal-sys"]
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-# Zstandard GeoTIFF tiles decoded by the `tiff` crate, with the zstd C library (WebAssembly builds
-# decode them with `ruzstd`, in `tiff_codecs`).
-tiff = { workspace = true, features = ["zstd"] }
+# `libzstd`: EPT tiles' Zstandard, natively (without it, and in WebAssembly, `ruzstd`).
 memmap2.workspace = true
-zstd.workspace = true
+zstd = { workspace = true, optional = true }
 tempfile.workspace = true
 ureq = { workspace = true, optional = true }
 hmac = { workspace = true, optional = true }
