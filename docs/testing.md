@@ -440,9 +440,9 @@ cargo test -p terrio --lib shapefile
 python scripts/conformance.py ../terrio-data --only shapefile-rings --strict
 ```
 
-The `shapefile-rings` suite writes 15 synthetic records with OGR (Esri holes, a
-single-part record, figure-eights, spikes, same-direction loops, duplicate points,
-hole parts that are figure-eights or enclose an island, and stored holes touching
+The `shapefile-rings` suite writes 18 synthetic records with OGR (Esri holes, a
+single-part record, rings stored from inside a hole, figure-eights, spikes,
+same-direction loops, duplicate points, hole parts that are figure-eights or enclose an island, and stored holes touching
 the exterior), checks in the `.shp` that the rings are stored as given, and compares
 OGR's reading with Terrio's GeoPackage output, ISO WKB byte for byte. With GDAL 3.12
 the reference is GDAL 3.13.1's reading, frozen in the script. One case is within
