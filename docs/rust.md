@@ -267,6 +267,19 @@ let pixels = as_features(&nlcd, &AsFeaturesOptions { geometry: PixelGeometry::Po
 # Ok::<(), terrio::Error>(())
 ```
 
+```rust
+use terrio::ops::blend::{blend, BlendOperator, BlendOptions};
+use terrio::ops::palette::{pct2rgb, rgb_to_palette, RgbToPaletteOptions};
+let rgb = terrio::open_raster("rgb.tif")?;
+let shade = terrio::open_raster("hillshade.tif")?;
+let shaded = blend(&rgb, &shade, &BlendOptions { operator: BlendOperator::HsvValue, opacity: 100 })?;
+let paletted = rgb_to_palette(&rgb, &RgbToPaletteOptions { color_count: 64, ..Default::default() })?;
+let expanded = pct2rgb(&paletted, &Default::default())?; // RasterDataset::color_table holds the table
+# Ok::<(), terrio::Error>(())
+```
+
+`palette::median_cut` and `palette::dither` are GDAL's `GDALComputeMedianCutPCT` and
+`GDALDitherRGB2PCT`; `palette::parse_color_table` and `load_color_table` read color files.
 `terrio::ops::pixel::Reclassifier` parses and applies GDAL's mapping syntax on its own, and
 `mapping_from_file_text` reads mapping files. See [unscale](cli.md#unscale),
 [nodata-to-alpha](cli.md#nodata-to-alpha), [reclassify](cli.md#reclassify) and

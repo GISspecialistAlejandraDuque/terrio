@@ -103,6 +103,15 @@ enum Command {
     Reclassify(cmd::pixel::ReclassifyArgs),
     /// One vector feature per pixel, with band values as fields (like gdal raster as-features).
     AsFeatures(cmd::pixel::AsFeaturesArgs),
+    /// Blend an overlay onto a raster: src-over, hsv-value, multiply, screen... (like gdal raster blend).
+    Blend(cmd::color::BlendArgs),
+    /// Convert RGB to a paletted image by median cut and dithering (like gdal raster rgb-to-palette, rgb2pct.py).
+    RgbToPalette(cmd::color::RgbToPaletteArgs),
+    /// Expand a paletted band to RGB or RGBA (like pct2rgb.py).
+    #[command(name = "pct2rgb")]
+    Pct2rgb(cmd::color::Pct2RgbArgs),
+    /// Attach a color table from a file or a raster to a raster (like gdalattachpct.py).
+    AttachPct(cmd::color::AttachPctArgs),
     /// Grid a point cloud into a raster: min, max, mean, IDW, count or standard deviation per cell
     /// (like PDAL's writers.gdal), or a TIN or nearest-neighbour interpolation (like gdal_grid).
     Grid(cmd::grid::Args),
@@ -192,6 +201,10 @@ fn run_on_this_thread(args: Vec<OsString>, terrio: Option<Vec<OsString>>) -> i32
         Command::NodataToAlpha(a) => cmd::pixel::nodata_to_alpha(a),
         Command::Reclassify(a) => cmd::pixel::reclassify(a),
         Command::AsFeatures(a) => cmd::pixel::as_features(a),
+        Command::Blend(a) => cmd::color::blend(a),
+        Command::RgbToPalette(a) => cmd::color::rgb_to_palette(a),
+        Command::Pct2rgb(a) => cmd::color::pct2rgb(a),
+        Command::AttachPct(a) => cmd::color::attach_pct(a),
         Command::Grid(a) => cmd::grid::run(a),
         Command::Filter(a) => cmd::filter::run(a),
         Command::Mcp => serve_mcp(terrio),

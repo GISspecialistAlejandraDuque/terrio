@@ -13,6 +13,8 @@ const GEO_ASCII_PARAMS: u16 = 34737;
 const GDAL_METADATA: u16 = 42112;
 const GDAL_NODATA: u16 = 42113;
 const PHOTOMETRIC: u16 = 262;
+const BITS_PER_SAMPLE: u16 = 258;
+const COLOR_MAP: u16 = 320;
 const RPC_COEFFICIENTS: u16 = 50844;
 
 /// The georeferencing read from a GeoTIFF's first image.
@@ -52,6 +54,8 @@ pub(crate) struct GeoTags {
     pub unreadable_method: Option<u16>,
     /// The 92 values of the `RPCCoefficientTag`.
     pub rpc: Option<Vec<f64>>,
+    /// The color table of a palette image (`ColorMap`), as GDAL reads it.
+    pub color_table: Vec<[u8; 4]>,
 }
 
 impl GeoTags {
@@ -142,6 +146,8 @@ pub(crate) fn read_geo_tags_from<R: Read + Seek>(mut f: R) -> Option<GeoTags> {
         if !matches!(
             tag,
             PHOTOMETRIC
+                | BITS_PER_SAMPLE
+                | COLOR_MAP
                 | 259
                 | 277
                 | 338
@@ -295,6 +301,15 @@ pub(crate) fn read_geo_tags_from<R: Read + Seek>(mut f: R) -> Option<GeoTags> {
     }
     out.rpc = doubles(RPC_COEFFICIENTS).filter(|v| v.len() == 92).map(<[f64]>::to_vec);
     out.nodata = ascii(GDAL_NODATA).and_then(|s| parse_nodata(s.trim()));
+    if photometric == 3
+        && let Some(map) = shorts(COLOR_MAP)
+    {
+        let bits = shorts(BITS_PER_SAMPLE).and_then(|b| b.first()).copied().unwrap_or(8);
+        let n = map.len() / 3;
+        if bits <= 16 && n == 1 << bits {
+            out.color_table = color_table(&map[..n], &map[n..2 * n], &map[2 * n..], out.nodata);
+        }
+    }
     out.metadata = ascii(GDAL_METADATA).map(crate::drivers::gtiff_write::parse_gdal_metadata).unwrap_or_default();
     out.band_metadata = ascii(GDAL_METADATA).map(crate::drivers::gtiff_write::parse_gdal_band_metadata).unwrap_or_default();
 
@@ -464,6 +479,31 @@ fn read_offset<R: Read>(f: &mut R, big: bool, le: bool) -> Option<u64> {
         let a = [b[0], b[1], b[2], b[3]];
         Some(if le { u32::from_le_bytes(a) } else { u32::from_be_bytes(a) } as u64)
     }
+}
+
+/// A TIFF `ColorMap` as GDAL turns it into a color table (`TIFFColorMapTagToColorTable`): 16-bit
+/// components divided by 257, or by 256 when they all are multiples of 256, or kept when they
+/// are all below 256 (files written with 8-bit components); entries are opaque but for the
+/// nodata value's.
+pub(crate) fn color_table(red: &[u16], green: &[u16], blue: &[u16], nodata: Option<f64>) -> Vec<[u8; 4]> {
+    let all = || red.iter().chain(green).chain(blue);
+    let max = all().copied().max().unwrap_or(0);
+    let non_zero = all().any(|v| *v > 0);
+    let multiple_of_256 = all().all(|v| v % 256 == 0);
+    let divisor = if max > 0 && max < 256 {
+        1
+    } else if non_zero && multiple_of_256 {
+        256
+    } else {
+        257
+    };
+    let transparent = nodata.filter(|v| v.is_finite()).map(|v| v as i64);
+    (0..red.len())
+        .map(|i| {
+            let alpha = if transparent == Some(i as i64) { 0 } else { 255 };
+            [(red[i] / divisor) as u8, (green[i] / divisor) as u8, (blue[i] / divisor) as u8, alpha]
+        })
+        .collect()
 }
 
 /// Looks for a palette `PhotometricInterpretation` in the IFD at `offset`, recording its value's
@@ -805,6 +845,7 @@ pub(crate) fn read_geotiff_with_limits(path: &std::path::Path, limits: crate::co
     let mut ds = crate::RasterDataset::with_driver(raster, crate::formats::RasterDriver::GTiff, has_nodata);
     ds.band_metadata = tags.band_properties.clone();
     ds.gcps = tags.gcps.clone();
+    ds.color_table = tags.color_table.clone();
     if !tags.band_nodata.is_empty() {
         ds.band_nodata = (1..=samples).map(|b| tags.band_nodata.iter().find(|(i, _)| *i == b).map(|(_, v)| *v).or(tags.nodata)).collect();
         ds.has_nodata = ds.band_nodata[0].is_some();

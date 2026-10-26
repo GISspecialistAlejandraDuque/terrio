@@ -1317,7 +1317,7 @@ fn band_range(ds: &RasterDataset, band: usize) -> Result<(f64, f64)> {
 }
 
 /// GDAL's named colors.
-fn named_color(name: &str) -> Option<(i32, i32, i32)> {
+pub(crate) fn named_color(name: &str) -> Option<(i32, i32, i32)> {
     const COLORS: [(&str, f32, f32, f32); 16] = [
         ("white", 1.00, 1.00, 1.00),
         ("black", 0.00, 0.00, 0.00),

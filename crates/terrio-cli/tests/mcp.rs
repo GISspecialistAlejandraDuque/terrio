@@ -145,6 +145,39 @@ fn pixel_tools_are_discoverable_and_execute() {
 }
 
 #[test]
+fn color_tools_are_discoverable_and_execute() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = |name: &str| dir.path().join(name).to_str().unwrap().to_string();
+    let cfg = terrio::RasterConfig { cols: 2, rows: 1, bands: 3, data_type: terrio::DataType::U8, ..Default::default() };
+    let rgb = terrio::RasterDataset::new(terrio::Raster::from_data(cfg, vec![10.0, 200.0, 20.0, 100.0, 30.0, 0.0]).unwrap(), false);
+    terrio::write_raster_dataset(&rgb, &path("rgb.tif"), &Default::default()).unwrap();
+    std::fs::write(path("pal.txt"), "0 0 0 0\n1 255 255 255\n").unwrap();
+    let (rgb_in, pal, paletted, attached, expanded, blended) =
+        (path("rgb.tif"), path("pal.txt"), path("p.tif"), path("a.tif"), path("e.tif"), path("b.tif"));
+    let replies = session(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+        call(2, "rgb-to-palette", &[&rgb_in, &paletted, "--color-count", "2"]),
+        call(3, "blend", &[&rgb_in, &rgb_in, &blended, "--operator", "multiply"]),
+    ]);
+    let tools = replies[&1]["result"]["tools"].as_array().unwrap();
+    for name in ["blend", "rgb-to-palette", "pct2rgb", "attach-pct"] {
+        assert!(tools.iter().any(|t| t["name"] == name), "{name}");
+    }
+    for id in 2..=3 {
+        assert_eq!(replies[&id]["result"]["isError"], false, "{:?}", replies[&id]);
+    }
+    let replies = session(&[call(4, "attach-pct", &[&pal, &paletted, &attached]), call(5, "pct2rgb", &[&paletted, &expanded, "--rgba"])]);
+    for id in 4..=5 {
+        assert_eq!(replies[&id]["result"]["isError"], false, "{:?}", replies[&id]);
+    }
+    let p = terrio::open_raster(&paletted).unwrap();
+    assert_eq!((p.raster.bands, p.color_table.len()), (1, 256));
+    assert_eq!(terrio::open_raster(&attached).unwrap().color_table[1], [255, 255, 255, 255]);
+    assert_eq!(terrio::open_raster(&expanded).unwrap().raster.bands, 4);
+    assert_eq!(terrio::open_raster(&blended).unwrap().raster.bands, 3);
+}
+
+#[test]
 fn catalog_is_exposed_and_reads_an_indexed_window() {
     let dir = tempfile::tempdir().unwrap();
     let tile = dir.path().join("tile.asc");

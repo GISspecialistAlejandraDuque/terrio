@@ -284,6 +284,7 @@ impl LazyRaster {
             header.raster.metadata = t.tags.metadata.clone();
             header.band_metadata = t.tags.band_properties.clone();
             header.gcps = t.tags.gcps.clone();
+            header.color_table = t.tags.color_table.clone();
             header.raster.crs = t.tags.crs_info();
         }
         let overviews = self.overviews();
@@ -639,6 +640,7 @@ impl LazyRaster {
                 affine: ds.affine,
                 complex: ds.complex,
                 geolocation: ds.geolocation.clone(),
+                color_table: ds.color_table.clone(),
             };
         }
         let raster = wbraster::Raster {
@@ -664,6 +666,7 @@ impl LazyRaster {
         if let Inner::Tiff(t) = &self.inner {
             ds.band_metadata = t.tags.band_properties.clone();
             ds.gcps = t.tags.gcps.clone();
+            ds.color_table = t.tags.color_table.clone();
         }
         ds
     }
@@ -724,6 +727,7 @@ impl LazyRaster {
         header.raster.metadata = t.tags.metadata.clone();
         header.band_metadata = t.tags.band_properties.clone();
         header.gcps = t.tags.gcps.clone();
+        header.color_table = t.tags.color_table.clone();
         let rows = crate::ops::strips::strip_rows(width, bands, value_size, block);
         let mut out = crate::ops::strips::StripWriter::create(&header, path, options)?;
         let read = WindowOptions::default();
@@ -786,10 +790,14 @@ impl LazyRaster {
         ds.raster.nodata = first_nodata.unwrap_or(-9999.);
         ds.set_geo_transform([gt[0] + x * gt[1] + y * gt[2], gt[1], gt[2], gt[3] + x * gt[4] + y * gt[5], gt[4], gt[5]]);
         let (full_cols, full_rows) = (self.width(), self.height());
-        let (gcps, band_metadata) = match &self.inner {
-            Inner::Tiff(t) => (&t.tags.gcps, &t.tags.band_properties),
-            Inner::Memory(source) | Inner::Source(source, _) => (&source.gcps, &source.band_metadata),
+        let (gcps, band_metadata, color_table) = match &self.inner {
+            Inner::Tiff(t) => (&t.tags.gcps, &t.tags.band_properties, &t.tags.color_table),
+            Inner::Memory(source) | Inner::Source(source, _) => (&source.gcps, &source.band_metadata, &source.color_table),
         };
+        // The palette belongs to the first band.
+        if bands == [1] {
+            ds.color_table = color_table.clone();
+        }
         ds.gcps = gcps
             .iter()
             .cloned()

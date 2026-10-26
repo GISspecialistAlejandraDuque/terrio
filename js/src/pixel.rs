@@ -1,5 +1,6 @@
-//! Pixel-wise raster operations: `unscale`, `nodataToAlpha`, `reclassify` and `asFeatures`,
-//! with camelCase options after the command-line options.
+//! Pixel-wise raster operations: `unscale`, `nodataToAlpha`, `reclassify`, `asFeatures`,
+//! `blend`, `rgbToPalette`, `pct2rgb` and `attachPct`, with camelCase options after the
+//! command-line options.
 
 use crate::ops::input_raster;
 use crate::{Dataset, js_err, parse_options};
@@ -128,4 +129,137 @@ pub fn as_features(src: JsValue, options: JsValue) -> Result<Dataset, JsError> {
     let ds = input_raster(&src)?;
     let layer = terrio::ops::as_features::as_features(&ds, &o).map_err(js_err)?;
     Ok(Dataset::from_layers(vec![layer], VectorDriver::GeoJSON))
+}
+
+/// A color table given to an operation: the text of a color file, an array of `[r, g, b]` or
+/// `[r, g, b, a]` entries, or a raster (a `Dataset` or bytes) whose palette to take.
+fn color_table(v: &JsValue, fill: bool) -> Result<Vec<[u8; 4]>, JsError> {
+    if let Some(text) = v.as_string() {
+        return terrio::ops::palette::parse_color_table(&text, fill).map_err(js_err);
+    }
+    if js_sys::Array::is_array(v) {
+        let text: String = js_sys::JSON::stringify(v).map_err(|_| invalid("invalid color table"))?.into();
+        let entries: Vec<Vec<u8>> = serde_json::from_str(&text).map_err(|e| invalid(format!("color table: {e}")))?;
+        return entries
+            .into_iter()
+            .map(|e| match e.as_slice() {
+                [r, g, b] => Ok([*r, *g, *b, 255]),
+                [r, g, b, a] => Ok([*r, *g, *b, *a]),
+                _ => Err(invalid("color table entries are [r, g, b] or [r, g, b, a]")),
+            })
+            .collect();
+    }
+    let ds = input_raster(v)?;
+    if ds.color_table.is_empty() {
+        return Err(invalid("the raster has no color table"));
+    }
+    Ok(ds.color_table)
+}
+
+/// Splits `options` into the plain options and the value of `key`.
+fn take(options: &JsValue, key: &str) -> Result<(JsValue, Option<JsValue>), JsError> {
+    if options.is_undefined() || options.is_null() {
+        return Ok((JsValue::UNDEFINED, None));
+    }
+    let k = JsValue::from_str(key);
+    let value = js_sys::Reflect::get(options, &k).ok().filter(|v| !v.is_undefined());
+    let rest = js_sys::Object::assign(&js_sys::Object::new(), &options.clone().into());
+    js_sys::Reflect::delete_property(&rest, &k).map_err(|_| invalid("invalid options"))?;
+    Ok((rest.into(), value))
+}
+
+/// Options of [`blend`].
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+struct BlendArgs {
+    operator: String,
+    opacity: u32,
+}
+
+impl Default for BlendArgs {
+    fn default() -> Self {
+        Self { operator: "src-over".into(), opacity: 100 }
+    }
+}
+
+/// Blends an overlay onto a raster (`gdal raster blend`). Options: `operator` (`src-over`,
+/// `hsv-value`, `multiply`, `screen`, `overlay`, `hard-light`, `darken`, `lighten`,
+/// `color-burn`, `color-dodge`) and `opacity` (percent).
+#[wasm_bindgen]
+pub fn blend(src: JsValue, overlay: JsValue, options: JsValue) -> Result<Dataset, JsError> {
+    use terrio::ops::blend::{BlendOperator, BlendOptions};
+    let a: BlendArgs = parse_options(&options)?;
+    let o = BlendOptions { operator: BlendOperator::parse(&a.operator).map_err(js_err)?, opacity: a.opacity };
+    let (color, over) = (input_raster(&src)?, input_raster(&overlay)?);
+    Ok(Dataset::from_raster(terrio::ops::blend::blend(&color, &over, &o).map_err(js_err)?))
+}
+
+/// Options of [`rgb_to_palette`].
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+struct RgbToPaletteArgs {
+    color_count: usize,
+    output_nodata: Option<u8>,
+    dither: bool,
+    bit_depth: u32,
+}
+
+impl Default for RgbToPaletteArgs {
+    fn default() -> Self {
+        Self { color_count: 256, output_nodata: None, dither: true, bit_depth: 5 }
+    }
+}
+
+/// Converts RGB to a paletted raster (`gdal raster rgb-to-palette`, `rgb2pct.py`). Options:
+/// `colorCount`, `colorMap` (a color file's text, an array of entries, or a raster),
+/// `outputNodata`, `dither` (`true`), `bitDepth` (5 or 8).
+#[wasm_bindgen(js_name = rgbToPalette)]
+pub fn rgb_to_palette(src: JsValue, options: JsValue) -> Result<Dataset, JsError> {
+    use terrio::ops::palette::RgbToPaletteOptions;
+    let (rest, map) = take(&options, "colorMap")?;
+    let a: RgbToPaletteArgs = parse_options(&rest)?;
+    let o = RgbToPaletteOptions {
+        color_count: a.color_count,
+        color_table: map.as_ref().map(|m| color_table(m, false)).transpose()?,
+        output_nodata: a.output_nodata,
+        dither: a.dither,
+        bit_depth: a.bit_depth,
+    };
+    let ds = input_raster(&src)?;
+    Ok(Dataset::from_raster(terrio::ops::palette::rgb_to_palette(&ds, &o).map_err(js_err)?))
+}
+
+/// Options of [`pct2rgb`].
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+struct Pct2RgbArgs {
+    band: usize,
+    rgba: bool,
+}
+
+impl Default for Pct2RgbArgs {
+    fn default() -> Self {
+        Self { band: 1, rgba: false }
+    }
+}
+
+/// Expands a paletted band to RGB or RGBA (`pct2rgb.py`). Options: `band` (1), `rgba`, `pct` (a
+/// color table instead of the raster's: a color file's text, an array of entries, or a raster).
+#[wasm_bindgen]
+pub fn pct2rgb(src: JsValue, options: JsValue) -> Result<Dataset, JsError> {
+    use terrio::ops::palette::Pct2RgbOptions;
+    let (rest, pct) = take(&options, "pct")?;
+    let a: Pct2RgbArgs = parse_options(&rest)?;
+    let o = Pct2RgbOptions { band: a.band, rgba: a.rgba, color_table: pct.as_ref().map(|p| color_table(p, true)).transpose()? };
+    let ds = input_raster(&src)?;
+    Ok(Dataset::from_raster(terrio::ops::palette::pct2rgb(&ds, &o).map_err(js_err)?))
+}
+
+/// Attaches a color table to a raster's single Byte or UInt16 band (`gdalattachpct.py`). `pct`
+/// is a color file's text, an array of entries, or a raster whose palette to take.
+#[wasm_bindgen(js_name = attachPct)]
+pub fn attach_pct(pct: JsValue, src: JsValue) -> Result<Dataset, JsError> {
+    let table = color_table(&pct, true)?;
+    let ds = input_raster(&src)?;
+    Ok(Dataset::from_raster(terrio::ops::palette::attach_pct(&ds, &table).map_err(js_err)?))
 }

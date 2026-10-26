@@ -24,6 +24,7 @@
 //! `[x_origin, pixel_width, 0, y_origin, 0, -pixel_height]`.
 
 pub mod as_features;
+pub mod blend;
 pub mod calc;
 pub mod contour;
 pub mod dem;
@@ -34,6 +35,7 @@ pub mod geolocation;
 pub mod geometry;
 pub mod mosaic;
 pub mod overview;
+pub mod palette;
 pub mod pansharpen;
 pub mod pixel;
 pub mod polygonize;

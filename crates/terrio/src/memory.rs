@@ -518,6 +518,13 @@ pub(crate) mod codec {
         match driver {
             RasterDriver::GTiff | RasterDriver::Cog => {
                 let cog = driver == RasterDriver::Cog;
+                let inherited;
+                let options = if options.color_table.is_empty() && crate::dataset::carries_color_table(ds, Some(driver)) {
+                    inherited = RasterWriteOptions { color_table: ds.color_table.clone(), ..options.clone() };
+                    &inherited
+                } else {
+                    options
+                };
                 let mut opts = TiffOptions::from_write_options(options, cog, ds.nodata())?.ok_or_else(|| {
                     let name = options.compression.as_deref().unwrap_or_default();
                     Error::Unsupported(format!(

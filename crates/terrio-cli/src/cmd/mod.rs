@@ -2,6 +2,7 @@
 
 pub mod calc;
 pub mod catalog;
+pub mod color;
 pub mod convert;
 pub mod crs;
 pub mod dem;

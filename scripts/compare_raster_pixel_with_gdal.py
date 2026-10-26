@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """Compare terrio's pixel-wise raster commands with GDAL's on real files.
 
-Runs ``terrio unscale``, ``terrio nodata-to-alpha``, ``terrio reclassify`` and
-``terrio as-features`` and the equivalent ``gdal raster unscale``, ``gdal raster
-nodata-to-alpha``, ``gdal raster reclassify`` and ``gdal raster as-features`` commands
-(GDAL 3.12 or later; the reference is GDAL 3.13.3) on the files fetched by ``scripts/fetch_test_data.sh``, then reports
-for each case whether the outputs have the same size, type, nodata value, CRS, band color
-interpretations and scales, and how many pixels agree. Feature outputs are compared
-feature by feature: count, field names, field values and geometry coordinates.
+Runs ``terrio unscale``, ``nodata-to-alpha``, ``reclassify``, ``as-features``, ``blend``,
+``rgb-to-palette``, ``pct2rgb`` and ``attach-pct`` and the equivalent ``gdal raster``
+commands (GDAL 3.12 or later; the reference is GDAL 3.13.3), ``rgb2pct.py``, ``pct2rgb.py`` and ``gdalattachpct.py`` on the
+files fetched by ``scripts/fetch_test_data.sh``, then reports for each case whether the outputs
+have the same size, type, nodata value, CRS, band color interpretations, scales and color
+tables, and how many pixels agree. Feature outputs are compared feature by feature: count,
+field names, field values and geometry coordinates.
+
+GDAL 3.13's ``rgb-to-palette`` options (``--output-nodata``, ``--no-dither``, ``--bit-depth``,
+nodata and alpha masks) and ``blend`` operators beyond ``src-over`` and ``hsv-value`` are
+compared with GDAL 3.13 only (skipped with GDAL 3.12). ``rgb-to-palette`` is also checked
+against the band checksums GDAL 3.13.3's autotest expects, on its own test files (downloaded
+from GDAL's repository at v3.13.3).
 
 Usage:
     python scripts/compare_raster_pixel_with_gdal.py ../terrio-data [--terrio target/release/terrio]
@@ -28,6 +34,9 @@ from compare_dem_calc_with_gdal import compare, format_row, run  # noqa: E402
 
 gdal.UseExceptions()
 ogr.UseExceptions()
+
+#: GDAL 3.13 adds rgb-to-palette's nodata handling and options and the separable blend operators.
+GDAL_313 = int(gdal.VersionInfo()) >= 3130000
 
 S5P = (
     "S5P_OFFL_L2__CH4____20230101T000319_20230101T014449_27036_03_020400_20230103T110255.nc"
@@ -176,6 +185,141 @@ def cases(d, tmp):
     features("points skip-nodata", p["usgs_small"], ["--geometry-type", "point", "--skip-nodata"])
     features("table Landsat bands", p["landsat_small"], ["--include-row-col"], ext="csv")
     features("Landsat polygons skip-nodata", p["landsat_small"], ["--geometry-type", "polygon", "--skip-nodata"])
+
+    # Color tables. RGB without nodata (GDAL 3.12's median cut ignores nodata; 3.13's does not).
+    rgb = os.path.join(tmp, "rgb.tif")
+    gdal.Translate(rgb, f"{d}/landsat7.tif", srcWin=[0, 0, 400, 300], noData="none")
+    opera = f"{d}/OPERA_L3_DSWx_WTR.tif"
+    add("rgb-to-palette rgb2pct.py 256 colors", ["rgb2pct.py", rgb, "{out}"], ["rgb-to-palette", rgb, "{out}"])
+    add("rgb-to-palette rgb2pct.py 16 colors", ["rgb2pct.py", "-n", "16", rgb, "{out}"],
+        ["rgb-to-palette", rgb, "{out}", "--color-count", "16"])
+    add("rgb-to-palette rgb2pct.py raster palette", ["rgb2pct.py", "-pct", opera, rgb, "{out}"],
+        ["rgb-to-palette", rgb, "{out}", "--color-map", opera])
+    add("rgb-to-palette gdal raster 64 colors", ["gdal", "raster", "rgb-to-palette", "-q", rgb, "{out}", "--color-count", "64"],
+        ["rgb-to-palette", rgb, "{out}", "--color-count", "64"])
+    palette = os.path.join(tmp, "palette.txt")
+    with open(palette, "w") as f:
+        f.write("0 0 0 0\n11 70 107 159\n21 222 197 197\n41 104 171 95\n81 220 217 57 200\n95 108 159 184\n")
+    nlcd = p["nlcd"]
+    add("pct2rgb NLCD RGB", ["pct2rgb.py", nlcd, "{out}"], ["pct2rgb", nlcd, "{out}"])
+    add("pct2rgb OPERA RGBA", ["pct2rgb.py", "-rgba", opera, "{out}"], ["pct2rgb", opera, "{out}", "--rgba"])
+    add("pct2rgb palette file", ["pct2rgb.py", "-rgba", "-pct", palette, nlcd, "{out}"],
+        ["pct2rgb", nlcd, "{out}", "--rgba", "--pct", palette])
+    plain = os.path.join(tmp, "nlcd_plain.tif")
+    src = gdal.Open(nlcd)
+    ds = gdal.GetDriverByName("GTiff").Create(plain, src.RasterXSize, src.RasterYSize, 1)
+    ds.SetGeoTransform(src.GetGeoTransform())
+    ds.SetProjection(src.GetProjection())
+    ds.GetRasterBand(1).WriteArray(src.ReadAsArray())
+    ds = src = None
+    add("attach-pct palette file", ["gdalattachpct.py", palette, plain, "{out}"], ["attach-pct", palette, plain, "{out}"])
+    add("attach-pct raster palette", ["gdalattachpct.py", opera, plain, "{out}"], ["attach-pct", opera, plain, "{out}"])
+
+    # Blending: real Landsat 7 colors with a hillshade of USGS terrain, and GDAL's RGBA test image.
+    hs = os.path.join(tmp, "hillshade.tif")
+    gdal.DEMProcessing(os.path.join(tmp, "hs_full.tif"), f"{d}/usgs_dem.tif", "hillshade")
+    gdal.Translate(hs, os.path.join(tmp, "hs_full.tif"), width=400, height=300, resampleAlg="bilinear")
+    rgba = os.path.join(tmp, "rgba.tif")
+    gdal.Translate(rgba, p["landsat7_window"], srcWin=[0, 0, 400, 300])
+    ds = gdal.Translate(os.path.join(tmp, "rgba4.tif"), rgba, bandList=[1, 2, 3, 1])
+    alpha = np.where(ds.GetRasterBand(1).ReadAsArray() > 0, 255, 0).astype(np.uint8)
+    alpha[100:150, 100:200] = 128
+    ds.GetRasterBand(4).WriteArray(alpha)
+    ds.GetRasterBand(4).SetColorInterpretation(gdal.GCI_AlphaBand)
+    for b in range(1, 5):
+        ds.GetRasterBand(b).DeleteNoDataValue()
+    ds = None
+    rgba4 = os.path.join(tmp, "rgba4.tif")
+    gray_alpha = os.path.join(tmp, "gray_alpha.tif")
+    gdal.Translate(gray_alpha, rgba4, bandList=[2, 4])
+
+    def blend(name, color, overlay, opts=()):
+        add(f"blend {name}", ["gdal", "raster", "blend", "-q", color, overlay, "{out}", *opts],
+            ["blend", color, overlay, "{out}", *opts])
+
+    blend("hsv-value RGB hillshade", rgb, hs, ["--operator", "hsv-value"])
+    blend("hsv-value 50% opacity", rgb, hs, ["--operator", "hsv-value", "--opacity", "50"])
+    blend("hsv-value RGBA", rgba4, hs, ["--operator", "hsv-value"])
+    # GDAL's file output copies the input's first alpha row to every row (an opaque band here;
+    # its per-band reads copy the whole band); Terrio copies the input's alpha band. The color
+    # bands are compared.
+    out[-1]["bands"] = [1, 2, 3]
+    blend("src-over RGB gray 60%", rgb, hs, ["--opacity", "60"])
+    blend("src-over RGBA RGBA 75%", rgba4, rgba4, ["--opacity", "75"])
+    blend("src-over RGB RGBA", rgb, rgba4)
+    blend("src-over gray alpha over RGB", gray_alpha, rgb, ["--opacity", "80"])
+    blend("src-over gray RGBA", hs, rgba4, ["--opacity", "90"])
+    if GDAL_313:
+        rgb_nodata = os.path.join(tmp, "rgb_nodata.tif")
+        gdal.Translate(rgb_nodata, f"{d}/landsat7.tif", srcWin=[0, 0, 400, 300])
+        for name, opts in [
+            ("nodata mask", []),
+            ("no-dither", ["--no-dither"]),
+            ("bit-depth 8", ["--bit-depth", "8", "--color-count", "32"]),
+            ("output-nodata 255", ["--output-nodata", "255", "--color-count", "100"]),
+        ]:
+            add(f"rgb-to-palette gdal raster {name}", ["gdal", "raster", "rgb-to-palette", "-q", rgb_nodata, "{out}", *opts],
+                ["rgb-to-palette", rgb_nodata, "{out}", *opts])
+        add("rgb-to-palette gdal raster RGBA alpha", ["gdal", "raster", "rgb-to-palette", "-q", rgba4, "{out}"],
+            ["rgb-to-palette", rgba4, "{out}"])
+        for op in ("multiply", "screen", "overlay", "hard-light", "darken", "lighten", "color-burn", "color-dodge"):
+            blend(f"{op} RGBA RGBA", rgba4, rgba, ["--operator", op, "--opacity", "80"])
+        for op in ("multiply", "screen", "overlay", "hard-light", "color-burn", "color-dodge"):
+            blend(f"{op} RGB gray", rgb, hs, ["--operator", op])
+        blend("multiply gray over RGBA (swapped)", hs, rgba4, ["--operator", "multiply", "--opacity", "70"])
+        blend("darken gray alpha", gray_alpha, gray_alpha, ["--operator", "darken"])
+    return out
+
+
+#: GDAL 3.13.3's autotest/utilities/test_gdalalg_raster_rgb_to_palette.py: input, options and
+#: the output band checksum it expects.
+GDAL_313_PALETTE = [
+    ("nominal", "small_world.tif", [], 14890),
+    ("no-dither", "small_world.tif", ["--no-dither"], 4419),
+    ("bit-depth 8", "small_world.tif", ["--bit-depth", "8"], 7593),
+    ("RGBA alpha mask", "stefan_full_rgba.tif", [], 19683),
+    ("nodata 0 output-nodata 255", "stefan_rgb_nodata.tif", ["--output-nodata", "255"], 33355),
+    ("nodata 0 output-nodata 0", "stefan_rgb_nodata.tif", ["--output-nodata", "0"], 27863),
+]
+
+GDAL_DATA_URL = "https://raw.githubusercontent.com/OSGeo/gdal/v3.13.3/autotest/"
+
+
+def gdal_313_palette_cases(terrio, tmp):
+    """Checks rgb-to-palette against GDAL 3.13.3's autotest checksums.
+
+    Args:
+        terrio: The terrio executable.
+        tmp: The work directory.
+
+    Returns:
+        list: Results in the raster comparison's terms.
+    """
+    import urllib.request
+
+    files = {}
+    for name, sub in [("small_world.tif", "gdrivers/data"), ("stefan_full_rgba.tif", "gcore/data")]:
+        files[name] = os.path.join(tmp, name)
+        urllib.request.urlretrieve(f"{GDAL_DATA_URL}{sub}/{name}", files[name])
+    files["stefan_rgb_nodata.tif"] = os.path.join(tmp, "stefan_rgb_nodata.tif")
+    gdal.Translate(files["stefan_rgb_nodata.tif"], files["stefan_full_rgba.tif"], bandList=[1, 2, 3], noData=0)
+    out = []
+    for label, src, opts, expected in GDAL_313_PALETTE:
+        path = os.path.join(tmp, f"autotest_{len(out)}.tif")
+        r = {"name": f"rgb-to-palette GDAL 3.13 autotest {label}"}
+        try:
+            run([terrio, "rgb-to-palette", files[src], path, *opts])
+            ds = gdal.Open(path)
+            got = ds.GetRasterBand(1).Checksum()
+            ok = got == expected
+            r.update({"size": f"checksum {expected}", "same_size": True, "same_type": True, "same_nodata": True,
+                      "same_crs": True, "same_metadata": True, "gt_diff_px": 0.0, "differing": 0 if ok else 1,
+                      "exact": 1.0 if ok else 0.0, "within_tol": 1.0 if ok else 0.0, "max_diff": abs(got - expected),
+                      "inf_diff": 0})
+            ds = None
+        except Exception as e:  # noqa: BLE001 - report and continue
+            r["error"] = str(e).strip().splitlines()[-1][:300]
+        out.append(r)
     return out
 
 
@@ -204,7 +348,14 @@ def raster_extra(gout, tout):
                         b.GetOffset() or 0.0))
         return out
 
+    def table(ds):
+        ct = ds.GetRasterBand(1).GetColorTable()
+        return None if ct is None else [ct.GetColorEntry(i) for i in range(ct.GetCount())]
+
     gp, tp = props(g), props(t)
+    if table(g) != table(t):
+        gp.append(("color table", table(g) is not None))
+        tp.append(("color table differs", table(t) is not None))
     res = {"same_crs": same_crs, "same_metadata": gp == tp}
     if gp != tp:
         res["metadata"] = f"GDAL {gp}, terrio {tp}"
@@ -307,6 +458,10 @@ def main():
                 if c["kind"] == "vector":
                     r = compare_vector(gout, tout)
                 else:
+                    if c.get("bands"):
+                        for path in (gout, tout):
+                            gdal.Translate(path + ".bands.tif", path, bandList=c["bands"])
+                        gout, tout = gout + ".bands.tif", tout + ".bands.tif"
                     r = compare(gout, tout, c["tol"])
                     r.update(raster_extra(gout, tout))
             except Exception as e:  # noqa: BLE001 - report and continue
@@ -320,6 +475,15 @@ def main():
                     if r.get("metadata"):
                         line += f" ({r['metadata']})"
                 print(line, flush=True)
+        if not a.only or a.only in "rgb-to-palette GDAL 3.13 autotest":
+            try:
+                extra = gdal_313_palette_cases(a.terrio, tmp)
+            except Exception as e:  # noqa: BLE001 - offline: report and continue
+                extra = [{"name": "rgb-to-palette GDAL 3.13 autotest", "error": str(e)[:300]}]
+            for r in extra:
+                results.append(r)
+                if not a.json:
+                    print(format_row(r), flush=True)
     finally:
         if not a.keep:
             shutil.rmtree(tmp, ignore_errors=True)

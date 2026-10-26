@@ -241,13 +241,19 @@ const rgba = terrio.nodataToAlpha(landsat, { nodata: 0 });
 const groups = terrio.reclassify(nlcd, "11=1;[21,25)=2;DEFAULT=0", { ot: "Byte" });
 const fromFile = terrio.reclassify(nlcd, "", { mappingFile: await (await fetch("map.txt")).text() });
 const pixels = terrio.asFeatures(dem, { geometryType: "polygon", includeXy: true, skipNodata: true });
+const shaded = terrio.blend(rgb, hillshade, { operator: "hsv-value" });
+const paletted = terrio.rgbToPalette(rgb, { colorCount: 64 });
+const expanded = terrio.pct2rgb(paletted, { rgba: true }); // paletted.colorTable holds the table
+const attached = terrio.attachPct("0 0 0 0\n1 255 0 0\n", classes);
 ```
 
 Inputs are datasets or raster bytes; `asFeatures` returns a vector dataset (`toGeoJSON`,
 `toBytes`). WebAssembly cannot read local files, so a mapping file's text is passed as
-`mappingFile` instead of `@file`. See [unscale](cli.md#unscale),
-[nodata-to-alpha](cli.md#nodata-to-alpha), [reclassify](cli.md#reclassify) and
-[as-features](cli.md#as-features).
+`mappingFile` instead of `@file`; color tables are likewise a color file's text, an array of
+`[r, g, b, a]` entries or a paletted dataset. See [unscale](cli.md#unscale),
+[nodata-to-alpha](cli.md#nodata-to-alpha), [reclassify](cli.md#reclassify),
+[as-features](cli.md#as-features), [blend](cli.md#blend), [rgb-to-palette](cli.md#rgb-to-palette),
+[pct2rgb](cli.md#pct2rgb) and [attach-pct](cli.md#attach-pct).
 
 ## Geolocation-array warping
 

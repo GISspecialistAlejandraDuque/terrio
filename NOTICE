@@ -312,6 +312,24 @@ ISciences LLC (Daniel Baston); Copyright (c) 2001, Frank Warmerdam; Copyright (c
 Even Rouault. Licensed under the MIT permission and warranty terms reproduced above for GDAL.
 
 -------------------------------------------------------------------------------
+GDAL color commands: blend, rgb-to-palette, median cut and dithering
+-------------------------------------------------------------------------------
+
+crates/terrio/src/ops/blend.rs ports the composition arithmetic of apps/gdalalg_raster_blend.cpp
+(Copyright (c) 2025, Even Rouault; Copyright (c) 2009, Frank Warmerdam), and
+crates/terrio/src/ops/palette.rs ports apps/gdalalg_raster_rgb_to_palette.cpp (Copyright (c)
+2025, Even Rouault), alg/gdalmediancut.cpp (Copyright (c) 2001, Frank Warmerdam; Copyright
+(c) 2007-2010, Even Rouault), alg/gdaldither.cpp (Copyright (c) 2001, Frank Warmerdam;
+Copyright (c) 2007, Even Rouault) and the color file reading of gcore/gdalcolortable.cpp; the
+TIFF color map conversion in crates/terrio/src/geotiff.rs follows gcore/tiff_common.cpp. All
+from GDAL 3.13.3 (https://github.com/OSGeo/gdal). The pct2rgb and attach-pct behavior follows
+GDAL's swig/python/gdal-utils/osgeo_utils/pct2rgb.py, gdalattachpct.py and
+auxiliary/color_palette.py (Copyright (c) 2001, Frank Warmerdam; Copyright (c) 2020-2021,
+Idan Miara). Expected values in the blend unit tests come from GDAL 3.13.3's
+autotest/utilities/test_gdalalg_raster_blend.py. Licensed under the MIT permission and
+warranty terms reproduced above for GDAL.
+
+-------------------------------------------------------------------------------
 acadrust / ACadSharp
 -------------------------------------------------------------------------------
 

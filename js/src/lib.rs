@@ -492,6 +492,25 @@ impl Dataset {
         Ok(self.raster()?.nodata())
     }
 
+    /// The color table of a paletted first band: an array of `[r, g, b, a]` entries from index
+    /// 0, or `undefined`.
+    #[wasm_bindgen(getter, js_name = colorTable)]
+    pub fn color_table(&self) -> Result<JsValue, JsError> {
+        let r = self.raster()?;
+        let table = match r.dataset() {
+            Some(d) => d.color_table.clone(),
+            None => r.header().color_table,
+        };
+        if table.is_empty() {
+            return Ok(JsValue::UNDEFINED);
+        }
+        let out = js_sys::Array::new();
+        for e in table {
+            out.push(&js_sys::Uint8Array::from(&e[..]).into());
+        }
+        Ok(out.into())
+    }
+
     /// The CRS: `EPSG:xxxx` when its code is known, otherwise its WKT, or `undefined`. For vector
     /// datasets, the first layer's.
     #[wasm_bindgen(getter)]

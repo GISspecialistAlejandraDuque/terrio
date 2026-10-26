@@ -169,6 +169,17 @@ impl PyRaster {
         self.inner.dataset().and_then(|d| d.geolocation.as_ref()).map(|g| g.items())
     }
 
+    /// The color table of a paletted first band, as `(red, green, blue, alpha)` entries from
+    /// index 0, or `None`.
+    #[getter]
+    fn colormap(&self) -> Option<Vec<(u8, u8, u8, u8)>> {
+        let table = match self.inner.dataset() {
+            Some(d) => d.color_table.clone(),
+            None => self.inner.header().color_table,
+        };
+        (!table.is_empty()).then(|| table.into_iter().map(|[r, g, b, a]| (r, g, b, a)).collect())
+    }
+
     /// The metadata items a driver other than the GeoTIFF one read, as `(key, value)` pairs:
     /// dataset items (netCDF's `NC_GLOBAL#title`, `NETCDF_DIM_time_VALUES`...), band items as
     /// `BAND_<n>#<key>`, and subdatasets as `SUBDATASET_<n>_NAME`. Empty for GeoTIFFs, whose

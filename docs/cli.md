@@ -36,6 +36,10 @@ terrio <COMMAND>
   nodata-to-alpha  Replace nodata values with an alpha band (like gdal raster nodata-to-alpha)
   reclassify  Map values or ranges of values to new values (like gdal raster reclassify)
   as-features One vector feature per pixel, with band values as fields (like gdal raster as-features)
+  blend       Blend an overlay onto a raster: src-over, hsv-value, multiply, screen... (like gdal raster blend)
+  rgb-to-palette  Convert RGB to a paletted image (like gdal raster rgb-to-palette and rgb2pct.py)
+  pct2rgb     Expand a paletted band to RGB or RGBA (like pct2rgb.py)
+  attach-pct  Attach a color table from a file or a raster (like gdalattachpct.py)
   crs         Describe a coordinate reference system, or transform coordinates between two
   formats     List the formats terrio reads and writes
   grid        Grid a point cloud into a raster (like PDAL's writers.gdal)
@@ -778,6 +782,68 @@ value. `-b` selects bands (GDAL 3.13.3 accepts `-b` but reports every band). `--
 and `--overwrite` update an existing output, as for `polygonize`. The features are built in
 memory: mind the pixel count of large rasters. GDAL's `--update`, `--overwrite-layer` and
 layer creation options are not supported.
+
+## blend
+
+```sh
+terrio blend landsat_rgb.tif hillshade.tif shaded.tif --operator hsv-value
+terrio blend basemap.tif labels_rgba.tif out.tif --opacity 75
+terrio blend image.tif texture.tif out.tif --operator multiply
+```
+
+As `gdal raster blend` (GDAL 3.13): blends an overlay onto a color input of the same size, both
+of 1 (gray), 2 (gray and alpha), 3 (RGB) or 4 (RGBA) Byte bands; a single paletted band is
+expanded to RGBA first. `--operator` is `src-over` (alpha compositing, the default),
+`hsv-value` (the overlay's value with the input's hue and saturation, as `hsv_merge.py`; the
+input needs 3 or 4 bands), or one of the separable modes on premultiplied colors: `multiply`,
+`screen`, `overlay`, `hard-light`, `darken`, `lighten` (these two need the same number of color
+bands), `color-burn` and `color-dodge`. `--opacity` (0 to 100) scales the overlay's opacity.
+The output has the input's bands (gray, gray and alpha, RGB or RGBA), georeferencing and CRS;
+like GDAL, `multiply`, `screen`, `overlay` and `hard-light` swap the inputs when the overlay has
+more bands. The integer arithmetic is GDAL's, including the RGBA `src-over` path GDAL takes when
+it writes a file (GDAL's per-band reads of the same blend can differ by a level or two).
+GDAL 3.12 has only `src-over` and `hsv-value`. For an RGBA input, `hsv-value` copies the input's
+alpha band; the files GDAL 3.13.3 writes repeat the alpha band's first row on every row.
+
+## rgb-to-palette
+
+```sh
+terrio rgb-to-palette landsat_rgb.tif paletted.tif --color-count 64
+terrio rgb-to-palette image.tif paletted.tif --color-map palette.txt --no-dither
+```
+
+As `gdal raster rgb-to-palette` (GDAL 3.13) and `rgb2pct.py`: a color table from GDAL's median
+cut of a histogram of 5-bit (`--bit-depth 8`: 8-bit) components, then Floyd-Steinberg
+dithering (`--no-dither` takes the nearest colors). The input needs three Byte bands (red, green
+and blue by color interpretation, or the first three; an alpha band may follow). `--color-map`
+gives the table instead: a raster's palette or a color file (`index red green blue [alpha]`
+lines, as GDAL loads them). `--output-nodata` is the index of nodata pixels; by default 0 when
+the red, green and blue bands share a Byte nodata value or an alpha band follows, as in GDAL
+3.13 (whose median cut also leaves those pixels out; GDAL 3.12 does neither). The
+output is one paletted Byte band with the input's georeferencing. QGIS `.qml`/`.qlr` palettes
+are not read.
+
+## pct2rgb
+
+```sh
+terrio pct2rgb nlcd.tif nlcd_rgb.tif
+terrio pct2rgb water.tif water_rgba.tif --rgba --pct palette.txt
+```
+
+As `pct2rgb.py`: expands a paletted band (`-b`, 1 by default) to red, green and blue Byte bands,
+and alpha with `--rgba`. `--pct` uses another color table: a raster's, or a color file read as
+the GDAL Python utilities read them (indices 0 to 255, each index without a line taking the color
+of the line before). Values outside the table are an error.
+
+## attach-pct
+
+```sh
+terrio attach-pct palette.txt classes.tif classes_paletted.tif
+terrio attach-pct reference_paletted.tif classes.tif classes_paletted.tif
+```
+
+As `gdalattachpct.py`: copies a single Byte or UInt16 band with a color table attached, from a
+raster or a color file (read as `pct2rgb` reads it). GeoTIFF and COG outputs store the table.
 
 ## Native multidimensional arrays
 

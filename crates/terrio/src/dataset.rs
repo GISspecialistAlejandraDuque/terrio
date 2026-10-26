@@ -37,6 +37,10 @@ pub struct RasterDataset {
     /// Geolocation arrays, as GDAL's `GEOLOCATION` metadata: for swaths and other rasters
     /// georeferenced by a longitude and a latitude per pixel rather than a geotransform.
     pub geolocation: Option<Geolocation>,
+    /// The color table of a paletted first band, `(red, green, blue, alpha)` entries from index
+    /// 0, as GDAL reads it (GeoTIFF palettes); empty for none. A single Byte or UInt16 band's
+    /// table is written to GeoTIFF outputs by [`write_raster_dataset`].
+    pub color_table: Vec<[u8; 4]>,
 }
 
 /// Where the longitude and latitude of each pixel of a raster are, as GDAL describes geolocation
@@ -159,6 +163,7 @@ impl RasterDataset {
             affine: None,
             complex: false,
             geolocation: None,
+            color_table: Vec::new(),
         }
     }
 
@@ -727,6 +732,11 @@ pub fn write_raster_dataset(ds: &RasterDataset, path: &str, options: &RasterWrit
         geo_transform: options.geo_transform.or(ds.affine),
         gcps: options.inherited_gcps(ds, driver),
         band_metadata: if options.band_metadata.is_empty() { ds.band_metadata.clone() } else { options.band_metadata.clone() },
+        color_table: if options.color_table.is_empty() && carries_color_table(ds, driver) {
+            ds.color_table.clone()
+        } else {
+            options.color_table.clone()
+        },
         ..options.clone()
     };
     let pam = needs_nodata_pam(ds) && matches!(driver, Some(RasterDriver::GTiff | RasterDriver::Cog));
@@ -741,6 +751,15 @@ pub fn write_raster_dataset(ds: &RasterDataset, path: &str, options: &RasterWrit
         }
     }
     Ok(())
+}
+
+/// Whether a dataset's color table goes to an output: a single Byte or UInt16 band in a GeoTIFF.
+pub(crate) fn carries_color_table(ds: &RasterDataset, driver: Option<RasterDriver>) -> bool {
+    !ds.color_table.is_empty()
+        && ds.raster.bands == 1
+        && !ds.complex
+        && matches!(ds.raster.data_type, wbraster::DataType::U8 | wbraster::DataType::U16)
+        && matches!(driver, Some(RasterDriver::GTiff | RasterDriver::Cog))
 }
 
 /// TIFF's shared nodata tag cannot be overridden to "no nodata" by PAM.

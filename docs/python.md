@@ -209,11 +209,16 @@ rgba = terrio.nodata_to_alpha("landsat.tif", "rgba.tif")       # nodata to an al
 groups = terrio.reclassify("nlcd.tif", "11=1;[21,25)=2;DEFAULT=0", ot="Byte")
 groups = terrio.reclassify("nlcd.tif", "@mapping.txt")         # one entry per line
 pixels = terrio.as_features("dem.tif", "pixels.gpkg", geometry_type="polygon", include_xy=True)
+shaded = terrio.blend("rgb.tif", "hillshade.tif", operator="hsv-value")
+paletted = terrio.rgb_to_palette("rgb.tif", "paletted.tif", color_count=64)
+rgb = terrio.pct2rgb(paletted, rgba=True)                      # Raster.colormap holds the table
+paletted = terrio.attach_pct([(0, 0, 0), (255, 0, 0)], "classes.tif", "classes_paletted.tif")
 ```
 
-These follow GDAL's `gdal raster unscale`, `nodata-to-alpha`, `reclassify` and `as-features`;
-see [unscale](cli.md#unscale), [nodata-to-alpha](cli.md#nodata-to-alpha),
-[reclassify](cli.md#reclassify) and [as-features](cli.md#as-features).
+These follow GDAL's `gdal raster unscale`, `nodata-to-alpha`, `reclassify`, `as-features`,
+`blend`, `rgb-to-palette`, `pct2rgb.py` and `gdalattachpct.py`; color tables are paths (a
+raster's palette or a color file) or sequences of `(r, g, b[, a])`. See the [CLI](cli.md#unscale)
+sections of the same names.
 
 ## Typing
 

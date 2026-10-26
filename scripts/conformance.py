@@ -660,11 +660,16 @@ def suite_raster_pixel(ctx):
     """Pixel-wise raster commands against GDAL's unified ``gdal raster`` commands."""
     return suite_json_ops(
         ctx, "raster-pixel", "compare_raster_pixel_with_gdal.py", "Pixel-wise raster commands",
-        "`gdal raster unscale`, `nodata-to-alpha`, `reclassify` and `as-features`",
-        "Real USGS, Landsat, ECOSTRESS, NLCD and Sentinel-5P rasters (windows, packed copies with "
-        "band scales and offsets, and controlled nodata holes): size, type, nodata, CRS, band color "
-        "interpretations, scales and offsets must match, then every pixel is compared exactly. "
-        "Feature outputs: feature count, field names, every field value and geometry vertex, exactly.",
+        "`gdal raster unscale`, `nodata-to-alpha`, `reclassify`, `as-features`, `blend`, "
+        "`rgb-to-palette`, `rgb2pct.py`, `pct2rgb.py`, `gdalattachpct.py`",
+        "Real USGS, Landsat, ECOSTRESS, NLCD, OPERA and Sentinel-5P rasters (windows, packed copies "
+        "with band scales and offsets, and controlled nodata holes): size, type, nodata, CRS, band "
+        "color interpretations, scales, offsets and color tables must match, then every pixel is "
+        "compared exactly. Feature outputs: feature count, field names, every field value and "
+        "geometry vertex, exactly. GDAL 3.13-only rgb-to-palette options are checked against the "
+        "band checksums of GDAL 3.13.3's autotest; with GDAL 3.12 the 3.13-only operators and "
+        "options are skipped. One hsv-value RGBA case compares the color bands (GDAL's file "
+        "output repeats the first alpha row).",
         1,
     )
 

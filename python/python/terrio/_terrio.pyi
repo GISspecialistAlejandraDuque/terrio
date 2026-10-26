@@ -52,6 +52,10 @@ __all__ = [
     "nodata_to_alpha",
     "reclassify",
     "as_features",
+    "blend",
+    "rgb_to_palette",
+    "pct2rgb",
+    "attach_pct",
     "PointCloud",
     "PointCloudFile",
     "PointChunks",
@@ -148,6 +152,8 @@ class Raster:
     def metadata(self) -> list[tuple[str, str]]: ...
     @property
     def nodata(self) -> float | None: ...
+    @property
+    def colormap(self) -> list[tuple[int, int, int, int]] | None: ...
     @property
     def crs(self) -> str | None: ...
     @property
@@ -1033,6 +1039,79 @@ def as_features(
     overwrite: bool = False,
 ) -> Layer:
     """One vector feature per pixel (GDAL's ``gdal raster as-features``)."""
+    ...
+
+_ColorTable: TypeAlias = Sequence[tuple[int, int, int] | tuple[int, int, int, int]]
+
+def blend(
+    src: _RasterSource,
+    overlay: _RasterSource,
+    dst: str | None = None,
+    *,
+    operator: Literal[
+        "src-over",
+        "hsv-value",
+        "multiply",
+        "screen",
+        "overlay",
+        "hard-light",
+        "darken",
+        "lighten",
+        "color-burn",
+        "color-dodge",
+    ] = "src-over",
+    opacity: int = 100,
+    format: str | None = None,
+    compress: str | None = None,
+    tile_size: int | None = None,
+    bigtiff: bool = False,
+) -> Raster:
+    """Blends an overlay onto a raster (GDAL's ``gdal raster blend``)."""
+    ...
+
+def rgb_to_palette(
+    src: _RasterSource,
+    dst: str | None = None,
+    *,
+    color_count: int = 256,
+    color_map: str | _ColorTable | None = None,
+    output_nodata: int | None = None,
+    dither: bool = True,
+    bit_depth: int = 5,
+    format: str | None = None,
+    compress: str | None = None,
+    tile_size: int | None = None,
+    bigtiff: bool = False,
+) -> Raster:
+    """Converts RGB to a paletted raster (``gdal raster rgb-to-palette``, ``rgb2pct.py``)."""
+    ...
+
+def pct2rgb(
+    src: _RasterSource,
+    dst: str | None = None,
+    *,
+    band: int = 1,
+    rgba: bool = False,
+    pct: str | _ColorTable | None = None,
+    format: str | None = None,
+    compress: str | None = None,
+    tile_size: int | None = None,
+    bigtiff: bool = False,
+) -> Raster:
+    """Expands a paletted band to RGB or RGBA (``pct2rgb.py``)."""
+    ...
+
+def attach_pct(
+    pct: str | _ColorTable,
+    src: _RasterSource,
+    dst: str | None = None,
+    *,
+    format: str | None = None,
+    compress: str | None = None,
+    tile_size: int | None = None,
+    bigtiff: bool = False,
+) -> Raster:
+    """Attaches a color table to a raster's band (``gdalattachpct.py``)."""
     ...
 
 # Point clouds.

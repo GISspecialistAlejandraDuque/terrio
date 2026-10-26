@@ -1192,6 +1192,28 @@ test("unscale, nodataToAlpha, reclassify and asFeatures", () => {
   assert.throws(() => terrio.asFeatures(src, { geometryType: "line" }), /geometry type/);
 });
 
+test("blend, rgbToPalette, pct2rgb and attachPct", () => {
+  const gt = [100, 10, 0, 50, 0, -10];
+  const idx = terrio.rasterFromArray(new Uint8Array([0, 1, 2]), 3, 1, gt, "EPSG:32611");
+  const paletted = terrio.attachPct([[10, 20, 30], [40, 50, 60, 0], [70, 80, 90]], idx);
+  assert.deepEqual([...paletted.colorTable[1]], [40, 50, 60, 0]);
+  const back = terrio.open(paletted.toBytes("p.tif"), "p.tif");
+  assert.equal(back.colorTable.length, 256);
+  const rgba = terrio.pct2rgb(paletted, { rgba: true });
+  assert.equal(rgba.count, 4);
+  assert.deepEqual([...rgba.readBand(2)], [20, 50, 80]);
+  assert.deepEqual([...rgba.readBand(4)], [255, 0, 255]);
+  assert.deepEqual([...terrio.pct2rgb(idx, { pct: "0 255 0 0\n2 0 0 255\n" }).readBand(1)], [255, 255, 0]);
+  assert.throws(() => terrio.pct2rgb(idx), /color table/);
+  const rgb = terrio.rasterFromArray(new Uint8Array([10, 200, 10, 20, 100, 20, 30, 0, 30]), 3, 1, gt);
+  const pal = terrio.rgbToPalette(rgb, { colorMap: [[0, 0, 0], [200, 100, 0]], dither: false });
+  assert.deepEqual([...pal.readBand(1)], [0, 1, 0]);
+  const half = terrio.rasterFromArray(new Uint8Array(4).fill(128), 1, 1, gt);
+  const blended = terrio.blend(half, half, { operator: "multiply" });
+  assert.deepEqual([1, 2, 3, 4].map((b) => blended.readBand(b)[0]), [106, 106, 106, 192]);
+  assert.throws(() => terrio.blend(half, half, { operator: "xor" }), /operator/);
+});
+
 test("viewshed visibility, height and byte input", () => {
   const dem = terrio.rasterFromArray(new Float64Array([0, 0, 10, 0, 0]), 5, 1, [0, 10, 0, 10, 0, -10], "EPSG:32611");
   assert.deepEqual([...terrio.viewshed(dem, 5, 5, { cc: 0 }).readBand(1)], [255, 255, 255, 0, 0]);
