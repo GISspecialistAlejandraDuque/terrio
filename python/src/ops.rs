@@ -797,6 +797,8 @@ fn polygonize(
 ///         dynamic source CRS (GDAL's ``-s_coord_epoch``).
 ///     t_coord_epoch: The coordinate epoch of the target coordinates, for a dynamic target CRS
 ///         (GDAL's ``-t_coord_epoch``).
+///     promote_to_3d: Take the heights of 2D CRSs as ellipsoidal heights, so that datum
+///         transformations change them, as GDAL does after ``PromoteTo3D``.
 ///
 /// Returns:
 ///     tuple[numpy.ndarray, ...]: The transformed x and y coordinates, and heights when ``zs`` is
@@ -805,7 +807,7 @@ fn polygonize(
 /// Raises:
 ///     CRSError: If a CRS cannot be parsed or a point cannot be transformed.
 #[pyfunction]
-#[pyo3(signature = (xs, ys, src_crs, dst_crs, zs=None, *, s_coord_epoch=None, t_coord_epoch=None, allow_ballpark=None, only_best=false))]
+#[pyo3(signature = (xs, ys, src_crs, dst_crs, zs=None, *, s_coord_epoch=None, t_coord_epoch=None, allow_ballpark=None, only_best=false, promote_to_3d=false))]
 #[allow(clippy::too_many_arguments)]
 fn transform_points<'py>(
     py: Python<'py>,
@@ -818,6 +820,7 @@ fn transform_points<'py>(
     t_coord_epoch: Option<f64>,
     allow_ballpark: Option<bool>,
     only_best: bool,
+    promote_to_3d: bool,
 ) -> PyResult<Bound<'py, PyTuple>> {
     let np = py.import("numpy")?;
     let coords = |v: &Bound<'py, PyAny>| -> PyResult<Vec<f64>> {
@@ -836,8 +839,13 @@ fn transform_points<'py>(
     }
     let src = SpatialRef::parse(src_crs).py()?;
     let dst = SpatialRef::parse(dst_crs).py()?;
-    let opts =
-        TransformOptions { source_coordinate_epoch: s_coord_epoch, target_coordinate_epoch: t_coord_epoch, allow_ballpark, only_best };
+    let opts = TransformOptions {
+        source_coordinate_epoch: s_coord_epoch,
+        target_coordinate_epoch: t_coord_epoch,
+        allow_ballpark,
+        only_best,
+        promote_to_3d,
+    };
     let (ox, oy, oz) = crate::with_warnings(py, || -> terrio::Result<(Vec<f64>, Vec<f64>, Vec<f64>)> {
         let t = Transformer::with_options(&src, &dst, &opts)?;
         let mut ox = Vec::with_capacity(xs.len());

@@ -168,6 +168,8 @@ fn dtype_name(t: DataType) -> &'static str {
 struct WriteOptions {
     allow_ballpark: Option<bool>,
     only_best: bool,
+    /// Take the heights of 2D CRSs as ellipsoidal heights, as GDAL does after `PromoteTo3D`.
+    promote_to_3d: bool,
     /// The output format's short name, overriding the file name's extension.
     format: Option<String>,
     /// Reproject into this CRS.
@@ -610,7 +612,12 @@ impl Dataset {
     #[wasm_bindgen(js_name = toBytes)]
     pub fn to_bytes(&self, filename: &str, options: JsValue) -> Result<Vec<u8>, JsError> {
         let o: WriteOptions = parse_options(&options)?;
-        let transform_options = TransformOptions { allow_ballpark: o.allow_ballpark, only_best: o.only_best, ..Default::default() };
+        let transform_options = TransformOptions {
+            allow_ballpark: o.allow_ballpark,
+            only_best: o.only_best,
+            promote_to_3d: o.promote_to_3d,
+            ..Default::default()
+        };
         let t_srs = o.t_srs.as_deref().map(SpatialRef::parse).transpose().map_err(js_err)?;
         match &mut *self.inner.borrow_mut() {
             Inner::Raster(r) => {
@@ -702,6 +709,8 @@ impl Dataset {
 struct TransformPointsOptions {
     allow_ballpark: Option<bool>,
     only_best: bool,
+    /// Take the heights of 2D CRSs as ellipsoidal heights, as GDAL does after `PromoteTo3D`.
+    promote_to_3d: bool,
     /// The coordinate epoch of the source coordinates (decimal year), for a dynamic source CRS.
     s_coord_epoch: Option<f64>,
     /// The coordinate epoch of the target coordinates, for a dynamic target CRS.
@@ -784,6 +793,7 @@ pub fn transform_points(
         target_coordinate_epoch: o.t_coord_epoch,
         allow_ballpark: o.allow_ballpark,
         only_best: o.only_best,
+        promote_to_3d: o.promote_to_3d,
     };
     let t = Transformer::with_options(&src, &dst, &opts).map_err(js_err)?;
     let (mut ox, mut oy, mut oz) = (Vec::with_capacity(xs.len()), Vec::with_capacity(ys.len()), Vec::new());

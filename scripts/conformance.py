@@ -958,17 +958,34 @@ def suite_crs(ctx):
 # The PROJ definitions without an EPSG code that the tests check, by test file and test.
 PROJ_CASES = {
     "crs_benchmark": {
+        "unterminated_quoted_proj_values_are_refused": "Malformed quoted PROJ values are refused before parameters or +init can be used, as GDAL 3.12.2 / PROJ 9.8.1",
+        "web_mercator_keeps_its_origin_and_false_origin": (
+            "Web Mercator (webmerc): lon_0, x_0 and y_0, without the fallback", TOLERANCE,
+            "within 1e-9 degrees of GDAL 3.13.3 / PROJ 9.9.0",
+        ),
         "versioned_authority_references_match_proj": (
             "Versioned EPSG URN/URL references", TOLERANCE,
             "EPSG:4326 resolution; EPSG:3857 coordinates within 1e-7 m of PROJ 9.8.1",
+        ),
+        "lcc_omitted_second_parallel_is_zero_in_a_crs": (
+            "Lambert Conic Conformal: omitted 2nd parallel is 0 (CRS semantics), PROJ string and WKT", TOLERANCE,
+            "within 1e-9 degrees of GDAL 3.13.3 / PROJ 9.9.0",
         ),
         "winkel_tripel_omitted_parallel_preserves_crs_default": (
             "Winkel Tripel: omitted lat_1 equals explicit zero (CRS semantics)", TOLERANCE,
             "omitted and explicit-zero CRS parallel give equal coordinates",
         ),
+        "polar_stereographic_hemisphere_follows_lat_ts_in_a_crs": (
+            "Polar stereographic: the pole is on lat_ts's side (CRS semantics), PROJ string and WKT", TOLERANCE,
+            "within 1e-9 degrees of GDAL 3.13.3 / PROJ 9.9.0",
+        ),
         "orthographic_roundtrips_across_origins_scales_and_rotations": (
             "Orthographic: round trips across origins, figures, scales and azimuths", TOLERANCE,
             "round trip <1e-5 degrees at the ill-conditioned limb",
+        ),
+        "stereographic_origins_near_a_pole_stay_accurate": (
+            "Stereographic and Oblique Stereographic: origins within 1e-6 to 1e-12 degrees of a pole", TOLERANCE,
+            "within the origin's shift of the pole's answer; sterea within 2 mm of GDAL 3.13.3 at lat_0=89.99999999 (PROJ: 12,714 km at 89.9999999)",
         ),
         **{
             test: (name, TOLERANCE, "forward <1 mm; inverse <1e-7 degrees, or 1e-6 at exact poles (longitude weighted by cos(latitude))")
@@ -980,6 +997,34 @@ PROJ_CASES = {
                 "winkel_tripel_explicit_parallel_matches_operation_oracle": "Winkel Tripel: explicit lat_1=acos(2/pi) against PROJ's operation default",
             }.items()
         },
+        "quoted_proj_string_values_read_as_in_proj": (
+            "PROJ strings with values in double quotes", TOLERANCE,
+            "within 1e-9 degrees of GDAL 3.13.3 / PROJ 9.9.0",
+        ),
+    },
+    "operations": {
+        "reports_the_transformation_used": "Operation report: the name and accuracy of PROJ 9.9's first candidate without grids (27700 both ways, 31467, `+towgs84`)",
+        "reports_ballparks_and_no_operation": "Operation report: ballparks (4610, EGM96 without its grid) and no operation for one datum",
+    },
+    "crs_policy": {
+        "promoted_vector_heights_match_gdal_and_keep_geometry_dimensions": (
+            "Promoted vector heights and preserved geometry dimensions", TOLERANCE,
+            "GDAL 3.12.2 / PROJ 9.8.1: RD New to WGS84 3D, 1e-8 degrees / 1 mm; 2D stays 2D",
+        ),
+    },
+    "promote_to_3d": {
+        "heights_of_promoted_2d_crss_go_through_the_datum_transformation": (
+            "PromoteTo3D: heights of 2D CRSs through the datum transformation (RD New, sterea, sphere)", TOLERANCE,
+            "within 1e-8 degrees and 1 mm of GDAL 3.13.3 after OGRSpatialReference::PromoteTo3D",
+        ),
+    },
+    "refusal_kinds": {
+        "global_latitude_of_origin_validation_matches_proj": "PROJ 9.8.1 global lat_0 validation for longlat, UTM, geocentric, Web Mercator and ob_tran",
+        "strict_policy_allows_vertical_unit_conversion": (
+            "Strict NAVD88 metres to US survey feet", TOLERANCE,
+            "GDAL 3.12.2 / PROJ 9.8.1 under ONLY_BEST and ALLOW_BALLPARK=NO; 1e-10 height units",
+        ),
+        "strict_refusals_have_their_own_variants": "ONLY_BEST and ALLOW_BALLPARK refuse where GDAL 3.13.3 does without grids, horizontal and vertical (CH1903+, Tokyo, WGS 84 + EGM96)",
     },
     "geostationary": {
         "goes16_sweep_x_matches_proj": "GOES-16: `+proj=geos +h=35786023 +lon_0=-75 +sweep=x +ellps=GRS80`",
@@ -1021,7 +1066,7 @@ def proj_cases(s):
     """
     group = "CRS references and projection definitions"
     for file, tests in PROJ_CASES.items():
-        package = "terrio" if file == "geostationary" else "terrio-crs"
+        package = "terrio" if file in {"geostationary", "crs_policy"} else "terrio-crs"
         features = [] if package == "terrio" else ["--features", "wbprojection-fallback"]
         code, out, err = run(["cargo", "test", "--release", "-p", package, *features, "--test", file])
         first_case = len(s.cases)

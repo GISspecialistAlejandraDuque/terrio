@@ -5,7 +5,7 @@ use terrio::ops::vector_filter::{GeometryConversion, VectorTranslateOptions, Wri
 
 #[derive(clap::Args, Default)]
 pub struct VectorArgs {
-    /// Coordinate operation options: ALLOW_BALLPARK=YES|NO, ONLY_BEST=YES|NO.
+    /// Coordinate operation options: ALLOW_BALLPARK=YES|NO, ONLY_BEST=YES|NO, PROMOTE_TO_3D=YES|NO.
     #[arg(long = "ct-opt", visible_aliases = ["ct_opt", "to-option"], value_name = "KEY=VALUE", help_heading = "Vector options")]
     transform_options: Vec<String>,
     /// Keep the features matching this OGR SQL expression, such as "pop > 1e6 AND name LIKE 'A%'".

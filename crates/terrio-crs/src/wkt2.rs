@@ -185,7 +185,8 @@ pub(crate) fn to_proj(root: &Node) -> Result<Converted> {
         push("lat_0", lat_0());
         push("lon_0", lon_0());
         push("lat_1", p.get(SP1));
-        push("lat_2", p.get(SP2).or_else(|| p.get(SP1)));
+        // Without its second parallel, 0, as PROJ reads it.
+        push("lat_2", Some(p.get(SP2).unwrap_or(0.0)));
         "lcc"
     } else if is(&["albersequalarea"], &[9822]) {
         push("lat_0", lat_0());

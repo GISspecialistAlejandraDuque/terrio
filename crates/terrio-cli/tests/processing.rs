@@ -159,6 +159,22 @@ fn vector_conversion_refuses_ballparks_and_reports_fallbacks() {
 }
 
 #[test]
+fn crs_promotes_2d_crss_to_3d_on_request() {
+    // RD New to WGS 84 3D: the height is kept (h = 0) unless the 2D CRS is promoted, when it goes
+    // through the datum transformation (43.6 m, as GDAL after `PromoteTo3D`).
+    let dir = tempfile::tempdir().unwrap();
+    let height = |extra: &[&str]| {
+        let args = [&["crs", "EPSG:28992", "--to", "EPSG:4979", "--dim", "3", "85000", "447000", "0"], extra].concat();
+        let output = run(&args, dir.path());
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let out = String::from_utf8(output.stdout).unwrap();
+        out.split_whitespace().nth(2).unwrap().parse::<f64>().unwrap()
+    };
+    assert_eq!(height(&[]), 0.0);
+    assert!((height(&["--ct-opt", "PROMOTE_TO_3D=YES"]) - 43.6).abs() < 0.1);
+}
+
+#[test]
 fn point_cloud_reprojection_rejects_coordinate_options_before_reading() {
     let dir = tempfile::tempdir().unwrap();
     let output = run(&["convert", "missing.las", "out.las", "--t-srs", "EPSG:4326", "--ct-opt", "ONLY_BEST=YES"], dir.path());

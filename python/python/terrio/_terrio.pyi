@@ -764,6 +764,7 @@ def transform_points(
     t_coord_epoch: float | None = None,
     allow_ballpark: bool | None = None,
     only_best: bool = False,
+    promote_to_3d: bool = False,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]: ...
 @overload
 def transform_points(
@@ -777,6 +778,7 @@ def transform_points(
     t_coord_epoch: float | None = None,
     allow_ballpark: bool | None = None,
     only_best: bool = False,
+    promote_to_3d: bool = False,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]: ...
 def set_grid_search_paths(paths: Sequence[str | os.PathLike[str]] | None) -> None: ...
 def set_network_enabled(enabled: bool | None) -> None: ...

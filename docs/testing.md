@@ -185,6 +185,22 @@ CI saves dependency caches for PR updates as well as main, disables incremental
 compilation, and cancels obsolete runs when a PR receives a newer push. Release
 profiles and the full validation matrix are unchanged.
 
+Every push to main runs every job. Pull requests skip the slowest ones unless
+asked for them:
+
+| Job | Pull requests |
+| --- | --- |
+| real data vs GDAL (`ci.yml`) | Runs unless the PR changes only docs, Markdown, `js/` (other than its Rust code), `packaging/` or other workflows |
+| npm package (`ci-extended.yml`) | Label `ci:npm` or `ci:all`; the `wasm` job tests the Node.js package on every PR |
+| point clouds and conformance vs GDAL (`ci-extended.yml`) | Label `ci:conformance` or `ci:all` |
+| macOS and Windows (`ci-platforms.yml`) | Label `ci:macos`, `ci:windows` or `ci:all` |
+
+A label starts its jobs when added and reruns them on each push while it stays.
+`ci-extended.yml` and `ci-platforms.yml` can also be run by hand from GitHub
+Actions. Add
+`ci:npm` to PRs that change the npm build or WebAssembly-sensitive code, and
+`ci:conformance` to GDAL-parity work.
+
 ## Benchmark harness regressions
 
 ### CRS benchmark regressions (#266, #268)
@@ -227,7 +243,7 @@ python -m unittest discover -s scripts/tests -v
 
 These tests exercise benchmark correctness gates, independent CPU-budget selection,
 interleaved measurements and Linux affinity/background-load handling. They run in
-CI's conformance job without downloading benchmark datasets or asserting timing
+CI's real-data job without downloading benchmark datasets or asserting timing
 thresholds. Performance measurements remain an explicit local task; see
 [Benchmarks](benchmarks.md) for the methodology and latest GDAL version used.
 
@@ -616,3 +632,10 @@ python scripts/conformance.py ../terrio-data --only lazy-geotiff --strict
 `LazyRaster::rpc`, `file_list` and `sample_bits` are Rust APIs. Python and
 JavaScript exposure of these additional lazy-reader facts remains follow-up
 work; the existing bindings retain their behavior.
+
+## Release rehearsal
+
+The full release dry run is manual: select **Release dry run → Run workflow** in
+GitHub Actions before tagging a release. It builds the complete cross-platform
+wheel, CLI, installer and npm matrix without publishing. Pull requests retain the
+normal CI checks, including Python, WASM, API documentation and package validation.
