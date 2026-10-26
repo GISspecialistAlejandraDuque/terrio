@@ -132,6 +132,9 @@ pub struct LazyRaster {
     /// GDAL's external mask, the `.msk` sidecar of a local file without an internal mask: a TIFF
     /// whose first band is the per-dataset mask, with overviews of its own.
     sidecar_mask: Option<Box<LazyRaster>>,
+    /// GDAL's external overviews, the `.ovr` sidecar of a local GeoTIFF without internal ones:
+    /// a TIFF whose images are the overviews, largest first.
+    sidecar_overviews: Option<Box<LazyRaster>>,
 }
 
 impl std::fmt::Debug for LazyRaster {
@@ -270,14 +273,14 @@ impl LazyRaster {
         if let Inner::Memory(ds) = &self.inner {
             let inner = Inner::Memory(ds.clone());
             let sidecar_mask = self.sidecar_mask.as_mut().map(|m| Box::new(m.shared()));
-            return Self { inner, sidecar_mask };
+            return Self { inner, sidecar_mask, sidecar_overviews: None };
         }
         if let Inner::Source(header, source) = &self.inner
             && let Some(source) = source.shared_clone()
         {
             let inner = Inner::Source(header.clone(), source);
             let sidecar_mask = self.sidecar_mask.as_mut().map(|m| Box::new(m.shared()));
-            return Self { inner, sidecar_mask };
+            return Self { inner, sidecar_mask, sidecar_overviews: None };
         }
         let mut header = self.header();
         if let Inner::Tiff(t) = &self.inner {
@@ -309,6 +312,9 @@ impl LazyRaster {
         if let Some(mask) = &self.sidecar_mask {
             paths.extend(mask.input_paths()?);
         }
+        if let Some(ovr) = &self.sidecar_overviews {
+            paths.extend(ovr.input_paths()?);
+        }
         Ok(paths)
     }
 
@@ -318,7 +324,33 @@ impl LazyRaster {
     pub fn open(path: &str) -> Result<Self> {
         let mut r = Self::open_without_sidecars(path)?;
         r.find_sidecar_mask(path);
+        r.find_sidecar_overviews(path);
         Ok(r)
+    }
+
+    /// Attaches the `.ovr` sidecar of a local GeoTIFF without internal overviews (GDAL's external
+    /// overviews, as `gdaladdo -ro` writes them), when its images have the raster's bands and
+    /// data type and are smaller than it.
+    fn find_sidecar_overviews(&mut self, path: &str) {
+        let Inner::Tiff(t) = &self.inner else { return };
+        if t.levels.len() > 1 || !Location::parse(path).is_local() {
+            return;
+        }
+        let ovr = format!("{path}.ovr");
+        if !std::path::Path::new(&ovr).is_file() {
+            return;
+        }
+        match Self::open_tiff(&ovr) {
+            Ok(Some(o))
+                if o.band_count() == self.band_count()
+                    && o.data_type() == self.data_type()
+                    && o.width() < self.width().max(2)
+                    && o.height() <= self.height() =>
+            {
+                self.sidecar_overviews = Some(Box::new(o));
+            }
+            _ => crate::warnings::warn(format!("{ovr} is not an overview file of {path}: it is ignored")),
+        }
     }
 
     /// Attaches the `.msk` sidecar of a local file (`dem.tif.msk`, as GDAL writes it when
@@ -366,7 +398,7 @@ impl LazyRaster {
         }
         match Self::open_tiff(path)? {
             Some(r) => Ok(r),
-            None => crate::open_raster(path).map(|ds| Self { inner: Inner::Memory(Arc::new(ds)), sidecar_mask: None }),
+            None => crate::open_raster(path).map(|ds| Self { inner: Inner::Memory(Arc::new(ds)), sidecar_mask: None, sidecar_overviews: None }),
         }
     }
 
@@ -402,7 +434,7 @@ impl LazyRaster {
         }
         t.tags.warn_unreadable(path);
         t.file = file;
-        Ok(Some(Self { inner: Inner::Tiff(Box::new(t)), sidecar_mask: None }))
+        Ok(Some(Self { inner: Inner::Tiff(Box::new(t)), sidecar_mask: None, sidecar_overviews: None }))
     }
 
     /// Opens a GeoTIFF held in memory, reading only its headers now. Returns `None` when the bytes
@@ -419,7 +451,7 @@ impl LazyRaster {
         }
         let t = TiffRaster::new(source, None, limits)?;
         t.tags.warn_unreadable("a GeoTIFF in memory");
-        Ok(Some(Self { inner: Inner::Tiff(Box::new(t)), sidecar_mask: None }))
+        Ok(Some(Self { inner: Inner::Tiff(Box::new(t)), sidecar_mask: None, sidecar_overviews: None }))
     }
 
     /// Opens a remote GeoTIFF whose bytes the caller fetches (see [`crate::sparse`]), reading
@@ -441,7 +473,7 @@ impl LazyRaster {
         source.seek(SeekFrom::Start(0))?;
         let t = TiffRaster::new(source, None, limits)?;
         t.tags.warn_unreadable("a remote GeoTIFF");
-        Ok(Some(Self { inner: Inner::Tiff(Box::new(t)), sidecar_mask: None }))
+        Ok(Some(Self { inner: Inner::Tiff(Box::new(t)), sidecar_mask: None, sidecar_overviews: None }))
     }
 
     /// Opens an archive of image tiles (PMTiles or MBTiles) for reading by window, zoom levels
@@ -571,6 +603,11 @@ impl LazyRaster {
 
     /// The sizes `(width, height)` of the overviews, largest first.
     pub fn overviews(&self) -> Vec<(usize, usize)> {
+        if let Some(o) = &self.sidecar_overviews {
+            let mut sizes = vec![(o.width(), o.height())];
+            sizes.extend(o.overviews());
+            return sizes;
+        }
         match &self.inner {
             Inner::Tiff(t) => t.levels[1..].iter().map(|l| (l.width, l.height)).collect(),
             Inner::Memory(_) => Vec::new(),
@@ -755,10 +792,18 @@ impl LazyRaster {
         }
         let band_nodata: Vec<Option<f64>> = bands.iter().map(|b| self.band_nodata(*b)).collect();
         let gt = self.level_geo_transform(options.overview)?;
+        // An overview of the `.ovr` sidecar.
+        let external = match (options.overview, self.sidecar_overviews.as_mut()) {
+            (Some(i), Some(o)) => Some(o.read_window(window, &WindowOptions { bands: bands.clone(), overview: i.checked_sub(1) })?.raster.data),
+            _ => None,
+        };
         let (data, nodata, has_nodata, crs) = match &mut self.inner {
             Inner::Tiff(t) => {
                 let level = options.overview.map_or(0, |i| i + 1);
-                let data = t.read(level, window, &bands)?;
+                let data = match external {
+                    Some(data) => data,
+                    None => t.read(level, window, &bands)?,
+                };
                 (data, t.tags.nodata.unwrap_or(-9999.0), t.tags.nodata.is_some(), Some(t.tags.crs_info()))
             }
             Inner::Memory(ds) => (cut(&ds.raster, window, &bands), ds.raster.nodata, ds.has_nodata, Some(ds.raster.crs.clone())),
@@ -863,7 +908,7 @@ impl LazyRaster {
 
     /// A raster read by window by `source`, described by `header` (a dataset without pixels).
     pub(crate) fn from_source(header: RasterDataset, source: Box<dyn WindowSource>) -> Self {
-        Self { inner: Inner::Source(Arc::new(header), source), sidecar_mask: None }
+        Self { inner: Inner::Source(Arc::new(header), source), sidecar_mask: None, sidecar_overviews: None }
     }
 
     /// Wraps an archive of image tiles (PMTiles, MBTiles), its zoom levels as overviews.
@@ -876,7 +921,7 @@ impl LazyRaster {
 impl From<RasterDataset> for LazyRaster {
     /// Wraps a raster in memory, so that it is read by window like a lazy one.
     fn from(ds: RasterDataset) -> Self {
-        Self { inner: Inner::Memory(Arc::new(ds)), sidecar_mask: None }
+        Self { inner: Inner::Memory(Arc::new(ds)), sidecar_mask: None, sidecar_overviews: None }
     }
 }
 
