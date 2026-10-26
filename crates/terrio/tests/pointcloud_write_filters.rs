@@ -471,7 +471,12 @@ fn check_hierarchy(dir: &std::path::Path) -> std::collections::BTreeMap<String, 
         let points = match kind.as_str() {
             "laszip" => pointcloud::open_points(tile("laz").to_str().unwrap()).unwrap().header().point_count,
             "binary" => std::fs::metadata(tile("bin")).unwrap().len() / rl,
-            _ => zstd::decode_all(&std::fs::read(tile("zst")).unwrap()[..]).unwrap().len() as u64 / rl,
+            _ => {
+                let mut out = Vec::new();
+                let zst = std::fs::read(tile("zst")).unwrap();
+                std::io::Read::read_to_end(&mut ruzstd::decoding::StreamingDecoder::new(&zst[..]).unwrap(), &mut out).unwrap();
+                out.len() as u64 / rl
+            }
         };
         assert_eq!(points, *n, "node {k}");
         let p: Vec<i64> = k.split('-').map(|v| v.parse().unwrap()).collect();
@@ -542,6 +547,49 @@ fn ept_datasets_take_points_appended() {
             std::fs::read_dir(path.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
         assert!(!left.iter().any(|n| n.starts_with(".terrio")), "{left:?}");
     }
+}
+
+/// Zstandard EPT tiles of several frames (a skippable one among them), as other writers may
+/// store them, are read whole when points are appended, not as their first frame.
+#[test]
+fn ept_zstandard_tiles_of_several_frames_take_points_appended() {
+    let c = cloud(6_000, 23);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("set/ept.json");
+    let path_s = path.to_str().unwrap();
+    let b = c.bounds().unwrap();
+    let options = PointWriteOptions {
+        ept_data_type: EptDataType::Zstandard,
+        ept_bounds: Some([b[0], b[1], b[2], b[3], b[4], b[5]]),
+        ..Default::default()
+    };
+    pointcloud::write_points(&c.slice(0, 4_000), path_s, &options).unwrap();
+    // Every tile rewritten as two frames with a skippable frame between them.
+    let mut split = 0;
+    for entry in std::fs::read_dir(path.with_file_name("ept-data")).unwrap() {
+        let tile = entry.unwrap().path();
+        let mut records = Vec::new();
+        std::io::Read::read_to_end(&mut ruzstd::decoding::StreamingDecoder::new(&std::fs::read(&tile).unwrap()[..]).unwrap(), &mut records)
+            .unwrap();
+        let half = records.len() / 2;
+        let compress = |b: &[u8]| ruzstd::encoding::compress_to_vec(b, ruzstd::encoding::CompressionLevel::Fastest);
+        let skippable = [0x184D_2A50u32.to_le_bytes(), 4u32.to_le_bytes(), *b"skip"].concat();
+        std::fs::write(&tile, [compress(&records[..half]), skippable, compress(&records[half..])].concat()).unwrap();
+        split += 1;
+    }
+    assert!(split > 0);
+    let mut a = pointcloud::EptAppender::open(path_s, &options).unwrap();
+    a.start_source("more.laz", &c).unwrap();
+    a.write(&c.slice(4_000, 6_000)).unwrap();
+    a.finish().unwrap();
+    // Every point, the tiles left in several frames read whole too.
+    let las = pointcloud::open_points_bytes(pointcloud::write_points_bytes(&c, "a.las", &Default::default()).unwrap(), "a.las")
+        .unwrap()
+        .read(&Default::default())
+        .unwrap();
+    let back = pointcloud::open_points(path_s).unwrap().read(&Default::default()).unwrap();
+    let names = ["x", "y", "z", "intensity", "gps_time"];
+    assert_eq!(sorted_rows(&back, &names), sorted_rows(&las, &names));
 }
 
 /// Points outside an EPT dataset's cube are refused, and the dataset is left as it was; so are
@@ -663,4 +711,34 @@ fn ept_appends_interrupted_are_completed_or_discarded() {
     assert_eq!(ept["marker"], "recovered");
     assert!(!done.exists() && !partial.exists());
     assert_eq!(pointcloud::read_points(path.to_str().unwrap(), &Default::default()).unwrap().len(), 10_000);
+}
+
+#[test]
+fn ept_zstandard_underreported_hierarchy_is_refused_before_append() {
+    let points = cloud(64, 31);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("set/ept.json");
+    let bounds = points.bounds().unwrap();
+    let options = PointWriteOptions {
+        ept_data_type: EptDataType::Zstandard,
+        copc_leaf_points: Some(1000),
+        ept_bounds: Some(bounds),
+        ..Default::default()
+    };
+    pointcloud::write_points(&points.slice(0, 32), path.to_str().unwrap(), &options).unwrap();
+    let hierarchy_path = path.with_file_name("ept-hierarchy").join("0-0-0-0.json");
+    let mut hierarchy: serde_json::Value = serde_json::from_slice(&std::fs::read(&hierarchy_path).unwrap()).unwrap();
+    hierarchy["0-0-0-0"] = serde_json::json!(1);
+    std::fs::write(&hierarchy_path, serde_json::to_vec(&hierarchy).unwrap()).unwrap();
+    let tile = path.with_file_name("ept-data").join("0-0-0-0.zst");
+    let before = std::fs::read(&tile).unwrap();
+    let error = pointcloud::EptAppender::open(path.to_str().unwrap(), &options)
+        .and_then(|mut appender| {
+            appender.start_source("more.las", &points)?;
+            appender.write(&points.slice(32, 64))?;
+            appender.finish()
+        })
+        .unwrap_err();
+    assert!(error.to_string().contains("decompresses to more than"), "{error}");
+    assert_eq!(std::fs::read(tile).unwrap(), before);
 }

@@ -315,15 +315,8 @@ fn jpeg_encode(data: &[u8], c: &ChunkInfo, quality: u8, ycbcr: bool) -> Result<V
     Ok(out)
 }
 
-#[cfg(not(target_family = "wasm"))]
 fn zstd_compress(data: &[u8]) -> Result<Vec<u8>> {
-    Ok(zstd::bulk::compress(data, 9)?)
-}
-
-/// WebAssembly builds compress with the pure-Rust encoder (its fastest level).
-#[cfg(target_family = "wasm")]
-fn zstd_compress(data: &[u8]) -> Result<Vec<u8>> {
-    Ok(ruzstd::encoding::compress_to_vec(data, ruzstd::encoding::CompressionLevel::Fastest))
+    Ok(crate::zstandard::compress(data, 9)?)
 }
 
 /// PackBits run-length encoding, as TIFF defines it.
@@ -1809,7 +1802,7 @@ pub(crate) fn parse_gdal_band_metadata(xml: &str) -> Vec<(usize, String, String)
 
 // GDAL TIFF Item values carry a second CPL-escaped layer after XML decoding.
 // The writer mirrors GDAL; decoding only XML would change values and literal entities.
-fn xml_unescape(s: &str) -> String {
+pub(crate) fn xml_unescape(s: &str) -> String {
     s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&")
 }
 

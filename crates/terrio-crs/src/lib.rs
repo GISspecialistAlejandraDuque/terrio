@@ -275,7 +275,7 @@ impl SpatialRef {
             }
             return s;
         }
-        let epsg = if def::split_compound(wkt).is_some() { declared_epsg(wkt) } else { identify_epsg(wkt) };
+        let epsg = identify_epsg(wkt);
         Self { epsg, wkt: Some(wkt.to_string()), ..Default::default() }.with_esri()
     }
 
@@ -701,6 +701,11 @@ fn wkt_datums_and_others(wkt: &str) -> (Vec<u32>, &'static [u32]) {
 pub fn identify_epsg(wkt: &str) -> Option<u32> {
     if let Some(code) = declared_epsg(wkt) {
         return Some(code);
+    }
+    // A compound CRS is not its horizontal CRS: only the code it declares identifies it, as in
+    // `SpatialRef::from_wkt`.
+    if def::split_compound(wkt).is_some() {
+        return None;
     }
     let (datums, others) = wkt_datums_and_others(wkt);
     // No known datum (or no datum node, or WKT the reader cannot parse): no code, and on purpose
@@ -2007,6 +2012,14 @@ mod tests {
         assert_eq!(c.epsg, None);
         assert_eq!(c.name().unwrap(), "WGS 84 + EGM96 height");
         assert!(c.to_wkt().unwrap().starts_with("COMPD_CS[\"WGS 84 + EGM96 height\",GEOGCS[\"WGS 84\""));
+        // Its WKT is not identified as EPSG:4326, which has no heights, read back or identified.
+        let wkt = c.to_wkt().unwrap();
+        assert_eq!(identify_epsg(&wkt), None);
+        let read = SpatialRef::from_wkt(&wkt);
+        assert_eq!((read.epsg, read.name().as_deref()), (None, Some("WGS 84 + EGM96 height")));
+        // A compound WKT declaring its code keeps it.
+        let declared = format!("{},AUTHORITY[\"EPSG\",\"9707\"]]", wkt.strip_suffix(']').unwrap());
+        assert_eq!(SpatialRef::from_wkt(&declared).epsg, Some(9707));
         assert!(c.is_geographic());
         let k = SpatialRef::from_epsg(5498).unwrap();
         assert_eq!(k.name().unwrap(), "NAD83 + NAVD88 height");

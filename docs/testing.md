@@ -590,6 +590,34 @@ node --test --test-name-pattern='perspective projections' js/tests/node.test.mjs
 python scripts/conformance.py ../terrio-data --only perspective --strict
 ```
 
+## Lazy GeoTIFF metadata and external overviews
+
+The `lazy-geotiff` conformance suite runs the Rust regressions for sample bit
+sizes, Float32 tag nodata, PAM overrides, band properties, RPC tags/sidecars,
+file lists and external `.ovr` images. These are frozen GDAL reference checks;
+they do not regenerate references with the GDAL installed at test time.
+Metadata, selected pixel values and explicit masks use exact comparisons.
+Float16 samples remain widened to Float32 in Terrio, with `sample_bits() == 16`;
+GDAL 3.11 and later expose Float16 as a distinct data type.
+
+GDAL 3.12.2 accepts external overview images of irregular aspect ratios,
+equal dimensions and larger dimensions, when band count and sample type match.
+The overview retains its own nodata and internal or `.ovr.msk` mask; a base
+TIFF mask is not inherited by the external dataset. Its georeferencing is
+scaled from the base raster. Internal overviews take precedence over `.ovr`.
+External overview discovery applies to local files and adds one `.ovr` existence
+probe per local open, and probes `.ovr.msk` only when `.ovr` exists. It does
+not decode pixel chunks or probe remote paths.
+
+```sh
+cargo test -p terrio --test external_overviews --test geotiff_nodata
+python scripts/conformance.py ../terrio-data --only lazy-geotiff --strict
+```
+
+`LazyRaster::rpc`, `file_list` and `sample_bits` are Rust APIs. Python and
+JavaScript exposure of these additional lazy-reader facts remains follow-up
+work; the existing bindings retain their behavior.
+
 ## Vector dataset commands (#289)
 
 `concat`, `partition`, `set-field-type`, `make-point`, `create` and `export-schema` are GDAL
