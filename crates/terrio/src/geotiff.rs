@@ -164,9 +164,11 @@ pub(crate) fn read_geo_tags_from<R: Read + Seek>(mut f: R) -> Option<GeoTags> {
         if !matches!(
             tag,
             PHOTOMETRIC
+                | 258
                 | 259
                 | 277
                 | 338
+                | 339
                 | MODEL_PIXEL_SCALE
                 | MODEL_TIEPOINT
                 | MODEL_TRANSFORMATION
@@ -296,13 +298,13 @@ pub(crate) fn read_geo_tags_from<R: Read + Seek>(mut f: R) -> Option<GeoTags> {
             if item.attr("domain").is_some() {
                 continue;
             }
-            let text = crate::drivers::gtiff_write::xml_unescape(&item.text);
+            // The band properties GDAL writes as items with a role (`GDALMetadata` of the GTiff driver).
             match item.attr("role") {
                 Some("colorinterp") => band.color_interp = Some(color_interpretation(&item.text).into()),
-                Some("description") => band.description = Some(text),
-                Some("scale") => band.scale = text.trim().parse().ok(),
-                Some("offset") => band.offset = text.trim().parse().ok(),
-                Some("unittype") => band.unit = Some(text),
+                Some("scale") => band.scale = item.text.trim().parse().ok(),
+                Some("offset") => band.offset = item.text.trim().parse().ok(),
+                Some("unittype") => band.unit = Some(crate::drivers::gtiff_write::xml_unescape(&item.text)),
+                Some("description") => band.description = Some(crate::drivers::gtiff_write::xml_unescape(&item.text)),
                 _ => {}
             }
         }
@@ -364,6 +366,12 @@ pub(crate) fn read_geo_tags_from<R: Read + Seek>(mut f: R) -> Option<GeoTags> {
     });
     out.rpc = doubles(RPC_COEFFICIENTS).filter(|v| v.len() == 92).map(<[f64]>::to_vec);
     out.nodata = ascii(GDAL_NODATA).and_then(|s| parse_nodata(s.trim()));
+    // GDAL rounds the nodata value of Float32 bands to Float32, so that it equals the samples
+    // written with it (-9999.1 is -9999.099609375).
+    let first = |tag: u16| shorts(tag).and_then(|s| s.first()).copied();
+    if first(258) == Some(32) && first(339) == Some(3) {
+        out.nodata = out.nodata.map(|v| v as f32 as f64);
+    }
     out.metadata = ascii(GDAL_METADATA).map(crate::drivers::gtiff_write::parse_gdal_metadata).unwrap_or_default();
     out.band_metadata = ascii(GDAL_METADATA).map(crate::drivers::gtiff_write::parse_gdal_band_metadata).unwrap_or_default();
 
@@ -482,14 +490,24 @@ fn apply_geokeys(out: &mut GeoTags, keys: &[u16], doubles: Option<&[f64]>, ascii
             out.epsg = out.crs.as_ref().and_then(|c| c.epsg);
         }
     }
+    // A vertical CRS (VerticalCSTypeGeoKey) on an EPSG horizontal CRS: the compound CRS, as GDAL
+    // reads it (EPSG:4326 with EGM96 heights is `EPSG:4326+5773`).
+    if let Some(h) = out.epsg
+        && let Some(v) = short_key(4096).filter(|c| *c != 0 && *c != 32767)
+        && let Ok(c) = crate::crs::SpatialRef::compound(h, u32::from(v))
+    {
+        out.epsg = None;
+        out.crs = Some(c.to_crs_info());
+    }
 }
 
 impl GeoTags {
     /// Takes the CRS of the `.aux.xml` sidecar of the file at `path`, when it holds one: it
     /// overrides the GeoKeys, as GDAL reads it (GDAL writes there the CRSs GeoKeys cannot hold).
-    pub(crate) fn apply_sidecar_crs(&mut self, path: &std::path::Path) {
+    /// Returns whether the sidecar was read.
+    pub(crate) fn apply_sidecar_crs(&mut self, path: &std::path::Path) -> bool {
         let Some(pam) = crate::drivers::common::read_pam(path) else {
-            return;
+            return false;
         };
         self.nodata = self.nodata.or(pam.dataset_nodata);
         self.band_nodata = pam.band_nodata;
@@ -499,6 +517,7 @@ impl GeoTags {
             self.crs = Some(crs);
             self.unreadable_method = None;
         }
+        true
     }
 
     /// Warns of a GeoKeys projection method that left the raster without CRS (see
@@ -950,6 +969,35 @@ mod tests {
         assert_eq!(color_interpretation("not a color &amp; role"), "Undefined");
         assert_eq!(parse_gdal_metadata(xml), [("title".into(), "a<b &lt;literal".into())]);
         assert_eq!(parse_gdal_band_metadata(xml), [(1, "note".into(), "c&d &amp;literal".into())]);
+    }
+
+    #[test]
+    fn vertical_geokeys_make_a_compound_crs() {
+        // The GeoKeys GDAL 3.13 writes for EPSG:4326+5773: geographic, PixelIsArea, 4326, 5773.
+        let keys = [1, 1, 0, 4, 1024, 0, 1, 2, 1025, 0, 1, 1, 2048, 0, 1, 4326, 4096, 0, 1, 5773];
+        let crs = crate::crs::SpatialRef::from_raster_crs(&crs_from_geokeys(&keys, None, None));
+        assert!(crs.to_wkt().unwrap().starts_with("COMPD_CS[\"WGS 84 + EGM96 height\","), "{crs:?}");
+        // Not identified as its horizontal CRS, which would drop the vertical CRS again.
+        assert_eq!(crs.epsg, None);
+        assert!(crs.same_as(&crate::crs::SpatialRef::parse("EPSG:4326+5773").unwrap()));
+        // Heights are EGM96 heights: WGS 84 ellipsoidal heights differ by the geoid undulation.
+        let t = crate::crs::Transformer::new(&crs, &crate::crs::SpatialRef::from_epsg(4979).unwrap()).unwrap();
+        let direct = crate::crs::Transformer::new(
+            &crate::crs::SpatialRef::parse("EPSG:4326+5773").unwrap(),
+            &crate::crs::SpatialRef::from_epsg(4979).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(t.transform_3d(153.0, -27.0, 0.0).ok(), direct.transform_3d(153.0, -27.0, 0.0).ok());
+        // Without the vertical key, or with an unknown or user-defined one: the horizontal CRS.
+        for v in [None, Some(32767), Some(1)] {
+            let mut keys = keys[..16].to_vec();
+            keys[3] = 3;
+            if let Some(v) = v {
+                keys.extend([4096, 0, 1, v]);
+                keys[3] = 4;
+            }
+            assert_eq!(crs_from_geokeys(&keys, None, None).epsg, Some(4326), "{v:?}");
+        }
     }
 
     #[test]

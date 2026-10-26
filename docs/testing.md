@@ -89,7 +89,7 @@ The [Conformance](conformance.md) page has the full, generated results; in short
 | Histograms | 84 of 84 cases identical to `gdalinfo -hist` (21 rasters of every type) |
 | `calc` | 35 of 37 cases identical; the other two within one float32 rounding step (NumPy's vectorized float32 `sin`, `exp`, `log10`, `arctan2`) |
 | `proximity`, `sieve` | 13 of 13 cases identical |
-| `compare`, `pixel-info`, `xyz` | compare 21 of 21 and xyz 11 of 11 identical; pixel-info 64 of 67 identical, 3 within 1e-9 relative (projection arithmetic, one scale/offset ULP) |
+| `compare`, `pixel-info`, `xyz` | compare 21 of 21 and xyz 11 of 11 identical; pixel-info 64 of 67 identical, 3 within 4e-14 relative (projection arithmetic, one scale/offset ULP) |
 | STAC and GeoZarr | 16 of 16 STAC checks (subdatasets, mosaics and windows identical to GDAL STACIT's, 328 footprint fields as `ogrinfo`'s), 99 of 99 STACTA checks (summaries, subdatasets and metadata as `gdalinfo`'s; whole rasters, windows and every overview identical to GDAL STACTA's on its 7 test items and on `gdal raster tile` pyramids of a DEM and a Landsat scene, local, over HTTP and with a missing tile) and 60 of 60 GeoZarr checks |
 | Remote Zarr stores | 45 of 45 checks on six public and served stores: sizes, geotransforms and nodata as `gdalinfo`'s; every window identical to `gdal_translate`'s (`/vsicurl/`, `/vsis3/`, `/vsigs/`, `/vsiaz/`) and xarray's, GeoZarr multiscales overviews identical to xarray's levels; windows 2 to 15 times faster than GDAL's |
 | Point clouds | 485 of 485 checks: every value identical to laspy; COPC queries and grids identical to PDAL |
@@ -590,3 +590,31 @@ python -m pytest python/tests/test_perspective.py
 node --test --test-name-pattern='perspective projections' js/tests/node.test.mjs
 python scripts/conformance.py ../terrio-data --only perspective --strict
 ```
+
+## Lazy GeoTIFF metadata and external overviews
+
+The `lazy-geotiff` conformance suite runs the Rust regressions for sample bit
+sizes, Float32 tag nodata, PAM overrides, band properties, RPC tags/sidecars,
+file lists and external `.ovr` images. These are frozen GDAL reference checks;
+they do not regenerate references with the GDAL installed at test time.
+Metadata, selected pixel values and explicit masks use exact comparisons.
+Float16 samples remain widened to Float32 in Terrio, with `sample_bits() == 16`;
+GDAL 3.11 and later expose Float16 as a distinct data type.
+
+GDAL 3.12.2 accepts external overview images of irregular aspect ratios,
+equal dimensions and larger dimensions, when band count and sample type match.
+The overview retains its own nodata and internal or `.ovr.msk` mask; a base
+TIFF mask is not inherited by the external dataset. Its georeferencing is
+scaled from the base raster. Internal overviews take precedence over `.ovr`.
+External overview discovery applies to local files and adds one `.ovr` existence
+probe per local open, and probes `.ovr.msk` only when `.ovr` exists. It does
+not decode pixel chunks or probe remote paths.
+
+```sh
+cargo test -p terrio --test external_overviews --test geotiff_nodata
+python scripts/conformance.py ../terrio-data --only lazy-geotiff --strict
+```
+
+`LazyRaster::rpc`, `file_list` and `sample_bits` are Rust APIs. Python and
+JavaScript exposure of these additional lazy-reader facts remains follow-up
+work; the existing bindings retain their behavior.

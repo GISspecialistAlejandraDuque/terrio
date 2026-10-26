@@ -1071,7 +1071,19 @@ impl EptAppender {
                 out
             }
             (_, EptDataType::Zstandard) => {
-                zstd::decode_all(&bytes[..]).map_err(|e| Error::InvalidData(format!("EPT tile {}: {e}", key_name(key))))?
+                // At most the records of the node's points in the hierarchy.
+                // All callers select a positive-count hierarchy entry. Refuse an
+                // inconsistent dataset explicitly instead of inventing a zero limit.
+                let points = self
+                    .hierarchy
+                    .get(&key)
+                    .copied()
+                    .ok_or_else(|| Error::InvalidData(format!("EPT: tile {} is missing from the hierarchy", key_name(key))))?;
+                let limit = usize::try_from(points)
+                    .ok()
+                    .and_then(|n| n.checked_mul(self.rl))
+                    .ok_or_else(|| Error::InvalidData(format!("EPT: tile {} hierarchy record size overflows", key_name(key))))?;
+                crate::zstandard::decompress(&bytes, limit).map_err(|e| Error::InvalidData(format!("EPT tile {}: {e}", key_name(key))))?
             }
             _ => bytes,
         };
@@ -1085,7 +1097,7 @@ impl EptAppender {
     fn write_tile(&mut self, ctx: &mut Ctx, key: VoxelKey, records: &[u8]) -> Result<()> {
         let bytes = match &self.codec {
             Codec::Las { header, layout } => super::ept_write::las_bytes(header, layout, records, true)?,
-            Codec::Schema if self.data_type == EptDataType::Zstandard => zstd::bulk::compress(records, 3)?,
+            Codec::Schema if self.data_type == EptDataType::Zstandard => crate::zstandard::compress(records, 3)?,
             Codec::Schema => records.to_vec(),
         };
         write_synced(&tile_path(&ctx.stage, key, self.data_type), &bytes)?;

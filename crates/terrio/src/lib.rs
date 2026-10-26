@@ -214,6 +214,7 @@ pub mod sparse;
 mod tiff_codecs;
 pub mod tiles;
 pub mod vector;
+mod zstandard;
 
 /// Raster types from `wbraster`, terrio's raster data model: pixel storage, CRS records and
 /// reprojection options.

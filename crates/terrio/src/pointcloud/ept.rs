@@ -351,7 +351,7 @@ impl EptReader {
     }
 
     /// Decodes a node's points into the schema's dimensions.
-    fn decode(&self, key: Key, bytes: Vec<u8>) -> Result<Vec<Dimension>> {
+    fn decode(&self, key: Key, points: u64, bytes: Vec<u8>) -> Result<Vec<Dimension>> {
         let schema = &self.info.schema;
         match self.info.data_type.as_str() {
             "laszip" => {
@@ -387,19 +387,17 @@ impl EptReader {
                     .collect()
             }
             kind => {
-                let bytes = if kind == "zstandard" {
-                    let mut out = Vec::new();
-                    let mut d = ruzstd::decoding::StreamingDecoder::new(std::io::Cursor::new(bytes))
-                        .map_err(|e| Error::InvalidData(format!("EPT node {}: {e}", key.name())))?;
-                    std::io::Read::read_to_end(&mut d, &mut out)?;
-                    out
-                } else {
-                    bytes
-                };
                 let rl: usize = schema.iter().map(|s| s.size).sum();
                 if rl == 0 {
                     return Err(Error::InvalidData("EPT: an empty schema".into()));
                 }
+                let bytes = if kind == "zstandard" {
+                    // Every frame, to at most the records of the node's points in the hierarchy.
+                    let limit = usize::try_from(points).ok().and_then(|n| n.checked_mul(rl)).unwrap_or(usize::MAX);
+                    crate::zstandard::decompress(&bytes, limit).map_err(|e| Error::InvalidData(format!("EPT node {}: {e}", key.name())))?
+                } else {
+                    bytes
+                };
                 let n = bytes.len() / rl;
                 let mut cols: Vec<Values> = self.schema_dims.iter().map(|(_, t)| Values::with_capacity(*t, n)).collect();
                 let stored: Vec<ValueType> = schema.iter().map(EptDimension::stored_type).collect::<Result<_>>()?;
@@ -504,17 +502,17 @@ impl FormatReader for EptReader {
             count += c.nodes[j].1;
             j += 1;
         }
-        let keys: Vec<Key> = c.nodes[c.next..j].iter().filter(|(_, n)| *n > 0).map(|(k, _)| *k).collect();
-        let files: Vec<String> = keys.iter().map(|k| self.data_file(*k)).collect();
+        let keys: Vec<(Key, u64)> = c.nodes[c.next..j].iter().filter(|(_, n)| *n > 0).copied().collect();
+        let files: Vec<String> = keys.iter().map(|(k, _)| self.data_file(*k)).collect();
         // Fetch (in parallel, on native builds) and decode the nodes.
         let base = &self.base;
         #[cfg(not(target_family = "wasm"))]
         let parts: Vec<Result<Vec<Dimension>>> = {
             use rayon::prelude::*;
-            keys.par_iter().zip(files.par_iter()).map(|(k, f)| self.decode(*k, fetch(base, f)?)).collect()
+            keys.par_iter().zip(files.par_iter()).map(|((k, n), f)| self.decode(*k, *n, fetch(base, f)?)).collect()
         };
         #[cfg(target_family = "wasm")]
-        let parts: Vec<Result<Vec<Dimension>>> = keys.iter().zip(&files).map(|(k, f)| self.decode(*k, fetch(base, f)?)).collect();
+        let parts: Vec<Result<Vec<Dimension>>> = keys.iter().zip(&files).map(|((k, n), f)| self.decode(*k, *n, fetch(base, f)?)).collect();
         let parts = parts.into_iter().collect::<Result<Vec<_>>>()?;
         let dims = super::read::concat(parts, &self.dims);
         c.next = j;
