@@ -47,6 +47,7 @@ pub mod sql;
 pub(crate) mod strips;
 pub mod topology;
 pub mod translate;
+pub mod update;
 pub mod vector_filter;
 pub mod viewshed;
 pub mod vrt;
