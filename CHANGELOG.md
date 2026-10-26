@@ -22,3 +22,11 @@
   previously treated as ordinary east/north coordinates. This matches GDAL's
   traditional GIS axis strategy; ordinary north/east Earth axes still use
   longitude, latitude order.
+
+### Warp
+
+- With bilinear, cubic and the other kernels, an output pixel whose source pixel
+  under the sample point is nodata (or cut out) is now left nodata for a
+  single-band source too, as GDAL does: it took a value renormalised over the
+  valid neighbours, which moved the edge of the data about a pixel into nodata
+  areas. Several bands already behaved so, with unified nodata.
