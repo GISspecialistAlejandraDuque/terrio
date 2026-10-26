@@ -9,14 +9,14 @@ use terrio::{Error, Layer, Result};
 #[derive(clap::Args)]
 pub struct VectorInput {
     /// The input vector dataset.
-    input: String,
+    pub(crate) input: String,
     /// Read only this layer (repeat to choose multiple layers). By default, every layer.
     #[arg(long = "layer", short = 'l')]
-    layers: Vec<String>,
+    pub(crate) layers: Vec<String>,
 }
 
 impl VectorInput {
-    fn open(&self) -> Result<Vec<Layer>> {
+    pub(crate) fn open(&self) -> Result<Vec<Layer>> {
         Ok(super::quiet(|| {
             terrio::open_vector(&self.input, &terrio::VectorOpenOptions { layers: self.layers.clone(), ..Default::default() })
         })?
@@ -32,7 +32,7 @@ pub struct VectorOutput {
     #[arg(short = 'f', long = "format")]
     format: Option<String>,
     /// The output layer name (requires a single input layer).
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, visible_alias = "output-layer", value_name = "NAME")]
     nln: Option<String>,
     /// Append features to layers of the same name in an existing GeoPackage.
     #[arg(long, conflicts_with = "overwrite")]
@@ -43,7 +43,12 @@ pub struct VectorOutput {
 }
 
 impl VectorOutput {
-    fn write(&self, mut layers: Vec<Layer>) -> Result<()> {
+    /// An output without a layer name.
+    pub(crate) fn new(output: &str, format: Option<String>, append: bool, overwrite: bool) -> Self {
+        Self { output: output.to_string(), format, nln: None, append, overwrite }
+    }
+
+    pub(crate) fn write(&self, mut layers: Vec<Layer>) -> Result<()> {
         if let Some(name) = &self.nln {
             if layers.len() != 1 {
                 return Err(Error::InvalidArgument("--nln requires a single input layer; choose one with --layer".into()));
