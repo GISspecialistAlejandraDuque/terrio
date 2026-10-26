@@ -25,7 +25,8 @@
 
 ### Shapefile
 
-- Polygon rings that touch themselves at a vertex to enclose a hole, which Esri
-  allows, are now split into an exterior and holes when read, as GDAL does. A
-  ring whose loops are not holes (a figure-eight, a loop outside the ring, a
-  spike) is still read as it is stored.
+- In polygon records of several parts, rings that touch themselves at a vertex
+  to enclose a hole, which Esri allows, are now split into an exterior and
+  holes when read, as GDAL does. A ring whose loops are not holes (a
+  figure-eight, a loop outside the ring, a spike), and a record of a single
+  ring, are still read as stored, also as GDAL does.
