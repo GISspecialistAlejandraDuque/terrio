@@ -24,6 +24,7 @@ pub mod sieve;
 pub mod translate;
 pub mod vector_opts;
 pub mod viewshed;
+pub mod vsi;
 pub mod warp;
 
 /// Runs `f` with standard output discarded, so that drivers' diagnostic prints do not mix with the

@@ -12,6 +12,7 @@ mod rio;
 mod stream;
 mod terrain;
 mod vector;
+mod vsi;
 
 use pyo3::prelude::*;
 use pyo3::types::PyType;
@@ -87,6 +88,7 @@ fn _terrio(m: &Bound<'_, PyModule>) -> PyResult<()> {
     pointcloud::register(m)?;
     rio::register(m)?;
     stream::register(m)?;
+    vsi::register(m)?;
     #[cfg(not(target_os = "emscripten"))]
     cli::register(m)?;
     Ok(())
