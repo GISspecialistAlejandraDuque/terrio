@@ -29,4 +29,7 @@
   to enclose a hole, which Esri allows, are now split into an exterior and
   holes when read, as GDAL does. A ring whose loops are not holes (a
   figure-eight, a loop outside the ring, a spike), and a record of a single
-  ring, are still read as stored, also as GDAL does.
+  ring, are still read as stored, also as GDAL does. The split rings start
+  one vertex after the stored one, as the rings GEOS rebuilds for GDAL do.
+- A hole whose first vertex lies on the exterior now belongs to that exterior.
+  It was read as a polygon of its own.

@@ -190,11 +190,15 @@ fn organize_rings(parts: Vec<Vec<Coord>>) -> Geometry {
     }
     let mut polygons: Vec<(Ring, Vec<Ring>)> = exteriors.into_iter().map(|r| (r, Vec::new())).collect();
     for h in holes {
-        let Some(p) = h.0.first() else { continue };
+        // Tested at the midpoint of the hole's first edge: a vertex of a hole may lie on the
+        // exterior (a hole may touch it), where the even-odd test is unreliable.
+        let Some(a) = h.0.first() else { continue };
+        let b = h.0.get(1).unwrap_or(a);
+        let (x, y) = ((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
         let owner = polygons
             .iter()
             .enumerate()
-            .filter(|(_, (e, _))| ring_contains(e, p.x, p.y))
+            .filter(|(_, (e, _))| ring_contains(e, x, y))
             .min_by(|a, b| a.1.0.signed_area().abs().total_cmp(&b.1.0.signed_area().abs()))
             .map(|(i, _)| i);
         match owner {
@@ -219,6 +223,10 @@ fn organize_rings(parts: Vec<Vec<Coord>>) -> Geometry {
 /// of the ring; the rest and the holes are returned. Otherwise (a figure-eight, a loop outside, a
 /// spike) the ring is returned as it is, with no holes, as it is when it never touches itself.
 /// Consecutive duplicate points are not loops.
+///
+/// Each ring returned starts one vertex after the stored ring enters it (the stored start for
+/// the rest, the touching vertex for a hole), where GEOS's polygonizer, which rebuilds the rings
+/// for GDAL, starts them.
 fn split_self_touching(cs: Vec<Coord>) -> (Vec<Coord>, Vec<Vec<Coord>>) {
     // `+ 0.0` makes -0.0 and 0.0 the same vertex, as GDAL's comparison of doubles does.
     let key = |c: &Coord| ((c.x + 0.0).to_bits(), (c.y + 0.0).to_bits());
@@ -257,7 +265,12 @@ fn split_self_touching(cs: Vec<Coord>) -> (Vec<Coord>, Vec<Vec<Coord>>) {
     if outer == 0.0 || !loops.iter().all(is_hole) {
         return (cs, Vec::new());
     }
-    (rest.0, loops)
+    let mut rest = rest.0;
+    rest.rotate_left(1);
+    for lp in &mut loops {
+        lp.rotate_left(1);
+    }
+    (rest, loops)
 }
 
 /// Whether a point is inside a ring (even-odd rule).
@@ -1002,19 +1015,43 @@ mod tests {
     fn splits_self_touching_rings_like_gdal() {
         // An Esri ring: clockwise round a 10 × 10 square, then round a hole touching the edge at
         // (5, 0), the way the ISTAT municipalities of Rutigliano and Santa Ninfa are stored. The
-        // stored hole, the second part, comes before the split one, as in GDAL.
+        // stored hole, the second part, comes before the split one, and each split ring starts one
+        // vertex later than stored, both as in GDAL.
         let ring = [(0.0, 0.0), (0.0, 10.0), (10.0, 10.0), (10.0, 0.0), (5.0, 0.0), (6.0, 2.0), (4.0, 2.0), (5.0, 0.0)];
         let hole = [(2.0, 6.0), (3.0, 6.0), (3.0, 7.0), (2.0, 7.0)];
         assert_eq!(
             polygon_rings(&organize_rings(vec![closed(&ring), closed(&hole)])),
             [vec![
-                vec![(0.0, 0.0), (0.0, 10.0), (10.0, 10.0), (10.0, 0.0), (5.0, 0.0)],
+                vec![(0.0, 10.0), (10.0, 10.0), (10.0, 0.0), (5.0, 0.0), (0.0, 0.0)],
                 hole.to_vec(),
-                vec![(5.0, 0.0), (6.0, 2.0), (4.0, 2.0)]
+                vec![(6.0, 2.0), (4.0, 2.0), (5.0, 0.0)]
+            ]]
+        );
+        // Two holes on one ring, in the order the ring runs through them.
+        let two = [(0.0, 0.0), (0.0, 10.0), (5.0, 10.0), (4.0, 8.0), (6.0, 8.0), (5.0, 10.0), (10.0, 10.0), (10.0, 0.0)]
+            .into_iter()
+            .chain([(5.0, 0.0), (6.0, 2.0), (4.0, 2.0), (5.0, 0.0)])
+            .collect::<Vec<_>>();
+        assert_eq!(
+            polygon_rings(&organize_rings(vec![closed(&two), closed(&hole)])),
+            [vec![
+                vec![(0.0, 10.0), (5.0, 10.0), (10.0, 10.0), (10.0, 0.0), (5.0, 0.0), (0.0, 0.0)],
+                hole.to_vec(),
+                vec![(4.0, 8.0), (6.0, 8.0), (5.0, 10.0)],
+                vec![(6.0, 2.0), (4.0, 2.0), (5.0, 0.0)]
             ]]
         );
         // GDAL reads a record of a single ring as it is stored.
         assert_eq!(polygon_rings(&organize_rings(vec![closed(&ring)])), [vec![ring.to_vec()]]);
+    }
+
+    #[test]
+    fn assigns_holes_touching_the_exterior() {
+        // A stored hole whose first vertex lies on the exterior, at (5, 10): the even-odd test at
+        // that vertex may say it is outside.
+        let square = [(0.0, 0.0), (0.0, 10.0), (10.0, 10.0), (10.0, 0.0)];
+        let hole = [(5.0, 10.0), (4.0, 8.0), (6.0, 8.0)];
+        assert_eq!(polygon_rings(&organize_rings(vec![closed(&square), closed(&hole)])), [vec![square.to_vec(), hole.to_vec()]]);
     }
 
     #[test]
