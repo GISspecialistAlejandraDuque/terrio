@@ -12,6 +12,7 @@
 use super::profile::LayerProfile;
 use crate::crs::SpatialRef;
 use crate::{Error, Result};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use wbvector::{Coord, Feature, FieldDef, FieldType, FieldValue, Geometry, GeometryType, Layer, Ring};
 
@@ -170,12 +171,13 @@ fn parse_shape(rec: &[u8]) -> Option<Geometry> {
 fn organize_rings(parts: Vec<Vec<Coord>>) -> Geometry {
     let rings: Vec<Ring> = parts
         .into_iter()
-        .map(|mut cs| {
+        .flat_map(|mut cs| {
             if cs.len() > 1 && (cs[0].x, cs[0].y) == (cs[cs.len() - 1].x, cs[cs.len() - 1].y) {
                 cs.pop();
             }
-            Ring::new(cs)
+            split_self_touching(cs)
         })
+        .map(Ring::new)
         .collect();
     let (mut exteriors, mut holes): (Vec<Ring>, Vec<Ring>) = rings.into_iter().partition(|r| r.signed_area() <= 0.0);
     if exteriors.is_empty() {
@@ -202,6 +204,56 @@ fn organize_rings(parts: Vec<Vec<Coord>>) -> Geometry {
     } else {
         Geometry::MultiPolygon(polygons)
     }
+}
+
+/// Splits off the holes of an Esri ring that touches itself at a vertex to enclose them. Esri
+/// accepts such a ring; OGC simple features don't. GDAL makes it valid in `organizePolygons`, when
+/// GEOS finds it valid under `ALLOW_SELFTOUCHING_RING_FORMING_HOLE`.
+///
+/// `cs` is an open ring, without its closing vertex. Each loop between two occurrences of a
+/// vertex becomes a ring of its own when it has an area, winds the other way round and lies
+/// inside the rest of the ring. Otherwise (a figure-eight, a loop outside, a spike) the ring is
+/// returned as it is, as it is when it never touches itself. Consecutive duplicate points are not
+/// loops.
+fn split_self_touching(cs: Vec<Coord>) -> Vec<Vec<Coord>> {
+    // `+ 0.0` makes -0.0 and 0.0 the same vertex, as GDAL's comparison of doubles does.
+    let key = |c: &Coord| ((c.x + 0.0).to_bits(), (c.y + 0.0).to_bits());
+    let mut path: Vec<Coord> = Vec::with_capacity(cs.len());
+    let mut at: HashMap<(u64, u64), usize> = HashMap::with_capacity(cs.len());
+    let mut loops: Vec<Vec<Coord>> = Vec::new();
+    for c in &cs {
+        match at.get(&key(c)) {
+            Some(&i) if i + 1 == path.len() => {}
+            Some(&i) => {
+                let mut lp = vec![path[i].clone()];
+                lp.extend(path.split_off(i + 1));
+                for removed in &lp[1..] {
+                    at.remove(&key(removed));
+                }
+                loops.push(lp);
+            }
+            None => {
+                at.insert(key(c), path.len());
+                path.push(c.clone());
+            }
+        }
+    }
+    if loops.is_empty() || path.len() < 3 {
+        return vec![cs];
+    }
+    let rest = Ring::new(path);
+    let outer = rest.signed_area();
+    let is_hole = |lp: &Vec<Coord>| {
+        if lp.len() < 3 {
+            return false;
+        }
+        let area = Ring::new(lp.clone()).signed_area();
+        area != 0.0 && (area > 0.0) != (outer > 0.0) && ring_contains(&rest, lp[1].x, lp[1].y)
+    };
+    if outer == 0.0 || !loops.iter().all(is_hole) {
+        return vec![cs];
+    }
+    std::iter::once(rest.0).chain(loops).collect()
 }
 
 /// Whether a point is inside a ring (even-odd rule).
@@ -924,6 +976,48 @@ mod tests {
         latin1.extend_from_slice(&bytes[at + 7..]);
         std::fs::write(&dbf, latin1).unwrap();
         assert_eq!(read(path).unwrap().features[0].attributes[0], FieldValue::Text("Zürich".into()));
+    }
+
+    /// The x/y of each ring of a polygon, exterior first.
+    fn polygon_rings(g: &Geometry) -> Vec<Vec<(f64, f64)>> {
+        let Geometry::Polygon { exterior, interiors } = g else { panic!("not a polygon: {g:?}") };
+        std::iter::once(exterior).chain(interiors).map(|r| r.0.iter().map(|c| (c.x, c.y)).collect()).collect()
+    }
+
+    fn closed(xy: &[(f64, f64)]) -> Vec<Coord> {
+        let mut cs: Vec<Coord> = xy.iter().map(|&(x, y)| Coord::xy(x, y)).collect();
+        cs.push(cs[0].clone());
+        cs
+    }
+
+    #[test]
+    fn splits_self_touching_rings_like_gdal() {
+        // An Esri ring: clockwise round a 10 × 10 square, then round a hole touching the edge at
+        // (5, 0), the way the ISTAT municipalities of Rutigliano and Santa Ninfa are stored.
+        let ring = [(0.0, 0.0), (0.0, 10.0), (10.0, 10.0), (10.0, 0.0), (5.0, 0.0), (6.0, 2.0), (4.0, 2.0), (5.0, 0.0)];
+        let g = organize_rings(vec![closed(&ring)]);
+        assert_eq!(
+            polygon_rings(&g),
+            [vec![(0.0, 0.0), (0.0, 10.0), (10.0, 10.0), (10.0, 0.0), (5.0, 0.0)], vec![(5.0, 0.0), (6.0, 2.0), (4.0, 2.0)]]
+        );
+        // With a hole of its own as a second part, it is kept next to the split one.
+        let hole = [(2.0, 6.0), (3.0, 6.0), (3.0, 7.0), (2.0, 7.0)];
+        assert_eq!(polygon_rings(&organize_rings(vec![closed(&ring), closed(&hole)])).len(), 3);
+    }
+
+    #[test]
+    fn keeps_rings_that_are_not_esri_holes() {
+        // A figure-eight: the second lobe lies outside the first.
+        let eight = [(0.0, 0.0), (0.0, 2.0), (2.0, 2.0), (2.0, 0.0), (4.0, 0.0), (4.0, -2.0), (2.0, -2.0), (2.0, 0.0)];
+        // A spike out and back along the same edge.
+        let spike = [(0.0, 0.0), (0.0, 4.0), (2.0, 4.0), (3.0, 5.0), (2.0, 4.0), (4.0, 4.0), (4.0, 0.0)];
+        // A loop inside, but wound the same way as the ring: not a hole.
+        let same = [(0.0, 0.0), (0.0, 10.0), (10.0, 10.0), (10.0, 0.0), (5.0, 0.0), (4.0, 2.0), (6.0, 2.0), (5.0, 0.0)];
+        // Consecutive duplicate points.
+        let dup = [(0.0, 0.0), (0.0, 4.0), (0.0, 4.0), (4.0, 4.0), (4.0, 0.0)];
+        for ring in [&eight[..], &spike, &same, &dup] {
+            assert_eq!(polygon_rings(&organize_rings(vec![closed(ring)])), [ring.to_vec()], "{ring:?}");
+        }
     }
 
     #[test]

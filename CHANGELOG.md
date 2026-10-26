@@ -22,3 +22,10 @@
   previously treated as ordinary east/north coordinates. This matches GDAL's
   traditional GIS axis strategy; ordinary north/east Earth axes still use
   longitude, latitude order.
+
+### Shapefile
+
+- Polygon rings that touch themselves at a vertex to enclose a hole, which Esri
+  allows, are now split into an exterior and holes when read, as GDAL does. A
+  ring whose loops are not holes (a figure-eight, a loop outside the ring, a
+  spike) is still read as it is stored.
