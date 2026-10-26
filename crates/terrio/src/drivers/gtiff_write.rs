@@ -1809,7 +1809,7 @@ pub(crate) fn parse_gdal_band_metadata(xml: &str) -> Vec<(usize, String, String)
 
 // GDAL TIFF Item values carry a second CPL-escaped layer after XML decoding.
 // The writer mirrors GDAL; decoding only XML would change values and literal entities.
-fn xml_unescape(s: &str) -> String {
+pub(crate) fn xml_unescape(s: &str) -> String {
     s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&")
 }
 
