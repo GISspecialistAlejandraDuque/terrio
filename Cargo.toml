@@ -15,7 +15,7 @@ authors = ["Qiusheng Wu <giswqs@gmail.com>"]
 # Memory-mapped reads of SQLite files (GeoPackage, MBTiles), native builds only.
 memmap2 = "0.9"
 terrio = { path = "crates/terrio", version = "0.5.0" }
-terrio-crs = { path = "crates/terrio-crs", version = "0.1.0" }
+terrio-crs = { path = "crates/terrio-crs", version = "0.1.0", default-features = false }
 # For the Python package (not published to crates.io), so without a version to keep in step.
 terrio-cli = { path = "crates/terrio-cli" }
 
@@ -48,8 +48,8 @@ bytes = "1"
 quick-xml = "0.42"
 # OpenStreetMap PBF decoding, the version wbvector uses.
 osmpbfreader = "0.19"
-# Its Zstandard (a C library) is enabled for native builds only (see `crates/terrio/Cargo.toml`):
-# WebAssembly builds decode Zstandard with `ruzstd`.
+# Its Zstandard (a C library) is enabled by the `libzstd` features of terrio and terrio-crs only:
+# otherwise terrio decodes Zstandard with `ruzstd`.
 tiff = { version = "0.11", features = ["webp"] }
 half = "2"
 flate2 = "1"

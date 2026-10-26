@@ -380,7 +380,7 @@ impl NodeSink for EptSink<'_> {
                         at += size;
                     }
                 }
-                if kind == EptDataType::Zstandard { zstd::bulk::compress(&out, 3)? } else { out }
+                if kind == EptDataType::Zstandard { crate::zstandard::compress(&out, 3)? } else { out }
             }
         };
         let mut f = std::io::BufWriter::new(
