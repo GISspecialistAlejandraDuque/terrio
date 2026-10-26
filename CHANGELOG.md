@@ -31,7 +31,7 @@
   whose loops are not holes (a figure-eight, a loop outside the ring, a spike),
   and a record of a single ring, are still read as stored, also as GDAL does.
   The split rings start one vertex after the stored one, as the rings GEOS
-  rebuilds for GDAL do. The `shapefile-rings` conformance suite compares 14
+  rebuilds for GDAL do. The `shapefile-rings` conformance suite compares 15
   such cases with GDAL.
 - A hole whose first vertex lies on the exterior now belongs to that exterior.
   It was read as a polygon of its own.

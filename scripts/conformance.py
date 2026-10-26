@@ -468,7 +468,7 @@ def suite_shapefile_archives(ctx):
 def suite_shapefile_rings(ctx):
     """Self-touching Shapefile polygon rings, split as GDAL 3.13 does (#308)."""
     suite = Suite("shapefile-rings", "Shapefile self-touching rings", "GDAL/OGR (3.13.1 reading frozen for GDAL 3.12)",
-                  "14 synthetic records written by OGR, read by OGR and converted by terrio to GeoPackage. "
+                  "15 synthetic records written by OGR, read by OGR and converted by terrio to GeoPackage. "
                   "Identical: the same ISO WKB bytes. Within tolerance: equal under GEOS and both valid, with rings "
                   "in another direction or from another start. GDAL 3.12 keeps these rings as stored; with it, "
                   "terrio is compared with GDAL 3.13.1's reading, frozen in the script.")

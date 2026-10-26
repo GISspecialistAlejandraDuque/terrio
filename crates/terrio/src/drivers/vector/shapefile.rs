@@ -172,17 +172,17 @@ fn organize_rings(parts: Vec<Vec<Coord>>) -> Geometry {
     // GDAL organizes, and since 3.13 splits self-touching rings, only in records of several parts.
     let several = parts.len() > 1;
     let mut rings: Vec<Ring> = Vec::with_capacity(parts.len());
-    let mut split_holes: Vec<Ring> = Vec::new();
+    let mut split_loops: Vec<Ring> = Vec::new();
     for mut cs in parts {
         if cs.len() > 1 && (cs[0].x, cs[0].y) == (cs[cs.len() - 1].x, cs[cs.len() - 1].y) {
             cs.pop();
         }
-        let (ring, holes) = if several { split_self_touching(cs) } else { (cs, Vec::new()) };
+        let (ring, loops) = if several { split_self_touching(cs) } else { (cs, Vec::new()) };
         rings.push(Ring::new(ring));
-        split_holes.extend(holes.into_iter().map(Ring::new));
+        split_loops.extend(loops.into_iter().map(Ring::new));
     }
     // After the stored rings, where GDAL puts them.
-    rings.extend(split_holes);
+    rings.extend(split_loops);
     let (mut exteriors, mut holes): (Vec<Ring>, Vec<Ring>) = rings.into_iter().partition(|r| r.signed_area() <= 0.0);
     if exteriors.is_empty() {
         // Wrongly wound: take every ring as an exterior.
@@ -190,10 +190,11 @@ fn organize_rings(parts: Vec<Vec<Coord>>) -> Geometry {
     }
     let mut polygons: Vec<(Ring, Vec<Ring>)> = exteriors.into_iter().map(|r| (r, Vec::new())).collect();
     for h in holes {
-        // Tested at the midpoint of the hole's first edge: a vertex of a hole may lie on the
-        // exterior (a hole may touch it), where the even-odd test is unreliable.
+        // Tested at the midpoint of the hole's first edge (to the first vertex that differs, as
+        // the first may be repeated): a vertex of a hole may lie on the exterior (a hole may touch
+        // it), where the even-odd test is unreliable.
         let Some(a) = h.0.first() else { continue };
-        let b = h.0.get(1).unwrap_or(a);
+        let b = h.0.iter().find(|b| (b.x, b.y) != (a.x, a.y)).unwrap_or(a);
         let (x, y) = ((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
         let owner = polygons
             .iter()
@@ -214,18 +215,19 @@ fn organize_rings(parts: Vec<Vec<Coord>>) -> Geometry {
     }
 }
 
-/// Splits off the holes of an Esri ring that touches itself at a vertex to enclose them. Esri
+/// Splits off the loops of an Esri ring that touches itself at a vertex to enclose them. Esri
 /// accepts such a ring; OGC simple features don't. Since 3.13, GDAL makes it valid in
 /// `organizePolygons` when GEOS finds it valid under `ALLOW_SELFTOUCHING_RING_FORMING_HOLE`.
 ///
 /// `cs` is an open ring, without its closing vertex. Each loop between two occurrences of a
-/// vertex becomes a hole when it has an area, winds the other way round and lies inside the rest
-/// of the ring; the rest and the holes are returned. Otherwise (a figure-eight, a loop outside, a
-/// spike) the ring is returned as it is, with no holes, as it is when it never touches itself.
-/// Consecutive duplicate points are not loops.
+/// vertex becomes a ring of its own when it has an area, winds the other way round than the rest
+/// of the ring and lies inside it: a hole of an exterior, or an island inside a hole part. The
+/// rest and the loops are returned. Otherwise (a figure-eight, a loop outside, a spike) the ring
+/// is returned as it is, with no loops, as it is when it never touches itself. Consecutive
+/// duplicate points are not loops.
 ///
 /// Each ring returned starts one vertex after the stored ring enters it (the stored start for
-/// the rest, the touching vertex for a hole), where GEOS's polygonizer, which rebuilds the rings
+/// the rest, the touching vertex for a loop), where GEOS's polygonizer, which rebuilds the rings
 /// for GDAL, starts them.
 fn split_self_touching(cs: Vec<Coord>) -> (Vec<Coord>, Vec<Vec<Coord>>) {
     // `+ 0.0` makes -0.0 and 0.0 the same vertex, as GDAL's comparison of doubles does.
@@ -255,14 +257,17 @@ fn split_self_touching(cs: Vec<Coord>) -> (Vec<Coord>, Vec<Vec<Coord>>) {
     }
     let rest = Ring::new(path);
     let outer = rest.signed_area();
-    let is_hole = |lp: &Vec<Coord>| {
+    let encloses = |lp: &Vec<Coord>| {
         if lp.len() < 3 {
             return false;
         }
         let area = Ring::new(lp.clone()).signed_area();
-        area != 0.0 && (area > 0.0) != (outer > 0.0) && ring_contains(&rest, lp[1].x, lp[1].y)
+        // Tested at the midpoint of the loop's first edge, off the touching vertex, which lies on
+        // the rest (`path` holds no consecutive duplicates, so the edge has a length).
+        let (x, y) = ((lp[0].x + lp[1].x) / 2.0, (lp[0].y + lp[1].y) / 2.0);
+        area != 0.0 && (area > 0.0) != (outer > 0.0) && ring_contains(&rest, x, y)
     };
-    if outer == 0.0 || !loops.iter().all(is_hole) {
+    if outer == 0.0 || !loops.iter().all(encloses) {
         return (cs, Vec::new());
     }
     let mut rest = rest.0;
@@ -1052,6 +1057,9 @@ mod tests {
         let square = [(0.0, 0.0), (0.0, 10.0), (10.0, 10.0), (10.0, 0.0)];
         let hole = [(5.0, 10.0), (4.0, 8.0), (6.0, 8.0)];
         assert_eq!(polygon_rings(&organize_rings(vec![closed(&square), closed(&hole)])), [vec![square.to_vec(), hole.to_vec()]]);
+        // The same hole with its first vertex repeated: the first edge has no length.
+        let repeated = [(5.0, 10.0), (5.0, 10.0), (4.0, 8.0), (6.0, 8.0)];
+        assert_eq!(polygon_rings(&organize_rings(vec![closed(&square), closed(&repeated)])), [vec![square.to_vec(), repeated.to_vec()]]);
     }
 
     #[test]

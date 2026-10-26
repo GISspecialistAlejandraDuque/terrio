@@ -60,6 +60,8 @@ CASES = [
      "POLYGON ((0 0,0 10,10 10,10 0,0 0),(5 10,4 8,6 8,5 10))"),
     ("stored holes, the first touching the exterior", [[SQUARE, [(5, 10), (4, 8), (6, 8)], HOLE]],
      "POLYGON ((0 0,0 10,10 10,10 0,0 0),(5 10,4 8,6 8,5 10),(2 6,3 6,3 7,2 7,2 6))"),
+    ("stored hole touching the exterior, first vertex repeated", [[SQUARE, [(5, 10), (5, 10), (4, 8), (6, 8)]]],
+     "POLYGON ((0 0,0 10,10 10,10 0,0 0),(5 10,5 10,4 8,6 8,5 10))"),
 ]
 
 
@@ -102,7 +104,9 @@ def compare(terrio, directory, name, polygons, frozen, live):
     if stored != given:
         raise RuntimeError("OGR did not store the rings as given")
     output = path.with_suffix(".gpkg")
-    subprocess.run([terrio, "convert", str(path), str(output)], check=True, capture_output=True)
+    result = subprocess.run([terrio, "convert", str(path), str(output)], capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(f"terrio convert failed: {result.stderr.strip()}")
     reference = read(path) if live else ogr.CreateGeometryFromWkt(frozen)
     actual = read(output)
     against = "" if live else "GDAL 3.13.1's reading (frozen); "

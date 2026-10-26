@@ -440,7 +440,7 @@ cargo test -p terrio --lib shapefile
 python scripts/conformance.py ../terrio-data --only shapefile-rings --strict
 ```
 
-The `shapefile-rings` suite writes 14 synthetic records with OGR (Esri holes, a
+The `shapefile-rings` suite writes 15 synthetic records with OGR (Esri holes, a
 single-part record, figure-eights, spikes, same-direction loops, duplicate points,
 hole parts that are figure-eights or enclose an island, and stored holes touching
 the exterior), checks in the `.shp` that the rings are stored as given, and compares
