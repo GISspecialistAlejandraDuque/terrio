@@ -221,7 +221,8 @@ pub(crate) fn read_geo_tags_from<R: Read + Seek>(mut f: R) -> Option<GeoTags> {
         let values = match typ {
             2 => Values::Ascii(String::from_utf8_lossy(&data).trim_end_matches('\0').to_string()),
             3 => Values::Shorts(data.chunks(2).map(u16_at).collect()),
-            5 => Values::Doubles(data.chunks(8).map(|c| f64::from(u32_at(&c[..4])) / f64::from(u32_at(&c[4..]))).collect()),
+            // A zero denominator gives a non-finite value, which is not reported.
+            5 => Values::Doubles(data.as_chunks::<8>().0.iter().map(|c| f64::from(u32_at(&c[..4])) / f64::from(u32_at(&c[4..]))).collect()),
             _ => Values::Doubles(data.chunks(8).map(|c| f64::from_bits(u64_at(c))).collect()),
         };
         tags.push((tag, values));
@@ -339,7 +340,10 @@ pub(crate) fn read_geo_tags_from<R: Read + Seek>(mut f: R) -> Option<GeoTags> {
         }
     }
     let first = |t: u16| doubles(t).and_then(|d| d.first()).copied();
-    if let (Some(x), Some(y)) = (first(X_RESOLUTION), first(Y_RESOLUTION)) {
+    if let (Some(x), Some(y)) = (first(X_RESOLUTION), first(Y_RESOLUTION))
+        && x.is_finite()
+        && y.is_finite()
+    {
         // libtiff holds resolutions as floats.
         let g8 = |v: f64| crate::drivers::common::fmt_g(f64::from(v as f32), 8);
         out.tiff_tag_items.push(("TIFFTAG_XRESOLUTION".into(), g8(x)));
