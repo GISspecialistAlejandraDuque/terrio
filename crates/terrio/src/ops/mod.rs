@@ -5,6 +5,9 @@
 //! [`geometry`] (centroids, singleparts and vertices), [`footprint`], [`sample`], and the vector
 //! filtering of `ogr2ogr` ([`vector_filter`], [`sql`]).
 //! [`topology`] provides planar buffers, polygon overlay/dissolve, validity, repair and cleanup.
+//! [`neighbors`] computes focal statistics (`gdal raster neighbors`), [`nearblack`] cleans image
+//! collars (`nearblack`, `gdal raster clean-collar`) and [`enhance`] applies lookup-table
+//! contrast enhancement (`gdalenhance`).
 //! [`contour`] generates elevation lines and [`zonal`] summarizes raster bands within polygons.
 //!
 //! ```no_run
@@ -26,12 +29,15 @@
 pub mod calc;
 pub mod contour;
 pub mod dem;
+pub mod enhance;
 pub mod fill_nodata;
 pub mod footprint;
 pub mod gcp;
 pub mod geolocation;
 pub mod geometry;
 pub mod mosaic;
+pub mod nearblack;
+pub mod neighbors;
 pub mod overview;
 pub mod pansharpen;
 pub mod polygonize;
