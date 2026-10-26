@@ -169,7 +169,7 @@ fn parse_shape(rec: &[u8]) -> Option<Geometry> {
 /// Groups rings into polygons: clockwise rings are exteriors, and each counter-clockwise ring is
 /// a hole of the smallest exterior containing it.
 fn organize_rings(parts: Vec<Vec<Coord>>) -> Geometry {
-    // GDAL organizes, and so splits self-touching rings, only in records of several parts.
+    // GDAL organizes, and since 3.13 splits self-touching rings, only in records of several parts.
     let several = parts.len() > 1;
     let mut rings: Vec<Ring> = Vec::with_capacity(parts.len());
     let mut split_holes: Vec<Ring> = Vec::new();
@@ -215,8 +215,8 @@ fn organize_rings(parts: Vec<Vec<Coord>>) -> Geometry {
 }
 
 /// Splits off the holes of an Esri ring that touches itself at a vertex to enclose them. Esri
-/// accepts such a ring; OGC simple features don't. GDAL makes it valid in `organizePolygons`, when
-/// GEOS finds it valid under `ALLOW_SELFTOUCHING_RING_FORMING_HOLE`.
+/// accepts such a ring; OGC simple features don't. Since 3.13, GDAL makes it valid in
+/// `organizePolygons` when GEOS finds it valid under `ALLOW_SELFTOUCHING_RING_FORMING_HOLE`.
 ///
 /// `cs` is an open ring, without its closing vertex. Each loop between two occurrences of a
 /// vertex becomes a hole when it has an area, winds the other way round and lies inside the rest
@@ -1016,7 +1016,7 @@ mod tests {
         // An Esri ring: clockwise round a 10 × 10 square, then round a hole touching the edge at
         // (5, 0), the way the ISTAT municipalities of Rutigliano and Santa Ninfa are stored. The
         // stored hole, the second part, comes before the split one, and each split ring starts one
-        // vertex later than stored, both as in GDAL.
+        // vertex later than stored, both as in GDAL 3.13.
         let ring = [(0.0, 0.0), (0.0, 10.0), (10.0, 10.0), (10.0, 0.0), (5.0, 0.0), (6.0, 2.0), (4.0, 2.0), (5.0, 0.0)];
         let hole = [(2.0, 6.0), (3.0, 6.0), (3.0, 7.0), (2.0, 7.0)];
         assert_eq!(
