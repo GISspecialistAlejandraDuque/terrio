@@ -22,3 +22,11 @@
   previously treated as ordinary east/north coordinates. This matches GDAL's
   traditional GIS axis strategy; ordinary north/east Earth axes still use
   longitude, latitude order.
+
+### Projections
+
+- `+proj=omerc` with two points (`+lat_1`/`+lon_1`, `+lat_2`/`+lon_2`) and no
+  azimuth is now computed as PROJ does; it was refused. GDAL's WKT1
+  `Hotine_Oblique_Mercator_Two_Point_Natural_Origin` (with GDAL's or ESRI's
+  parameter names) and WKT2 `Hotine Oblique Mercator Two Point Natural Origin`
+  are read, and the former is written.
