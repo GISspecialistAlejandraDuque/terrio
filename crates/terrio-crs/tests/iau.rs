@@ -57,8 +57,13 @@ fn different_celestial_bodies_have_no_earth_datum_route() {
     let source = SpatialRef::parse("IAU_2015:49900").unwrap();
     for target in ["EPSG:4326", "EPSG:4267", "IAU_2015:30100", "+proj=longlat +datum=NAD83"] {
         let target = SpatialRef::parse(target).unwrap();
-        assert!(Transformer::new(&source, &target).is_err());
-        assert!(Transformer::new(&target, &source).is_err());
+        for promote in [false, true] {
+            let options = TransformOptions { promote_to_3d: promote, ..Default::default() };
+            for (a, b) in [(&source, &target), (&target, &source)] {
+                let error = Transformer::with_options(a, b, &options).err().expect("cross-body transform accepted");
+                assert!(error.to_string().contains("celestial body"), "{error}");
+            }
+        }
     }
 }
 

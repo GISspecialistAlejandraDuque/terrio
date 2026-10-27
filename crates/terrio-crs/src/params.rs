@@ -4,21 +4,33 @@
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Params {
     items: Vec<(String, Option<String>)>,
+    unterminated_quote: bool,
 }
 
 impl Params {
-    /// Parses `+proj=utm +zone=33 +south` (the `+` signs are optional).
+    /// Parses `+proj=utm +zone=33 +south` (the `+` signs are optional). As in PROJ, a value may
+    /// be in double quotes (`+title="UTM 32"`), with `""` for a quote inside.
     pub fn parse(s: &str) -> Self {
-        let items = s
-            .split_whitespace()
-            .map(|t| t.trim_start_matches('+'))
-            .filter(|t| !t.is_empty())
-            .map(|t| match t.split_once('=') {
-                Some((k, v)) => (k.to_string(), Some(v.to_string())),
-                None => (t.to_string(), None),
+        let (tokens, unterminated_quote) = tokens(s);
+        let items = tokens
+            .into_iter()
+            .filter_map(|t| {
+                let t = t.trim_start_matches('+');
+                (!t.is_empty()).then(|| match t.split_once('=') {
+                    Some((k, v)) => (k.to_string(), Some(v.to_string())),
+                    None => (t.to_string(), None),
+                })
             })
             .collect();
-        Self { items }
+        Self { items, unterminated_quote }
+    }
+
+    /// Refuses a quoted value that would swallow the rest of a definition.
+    pub fn validate_quoting(&self) -> crate::Result<()> {
+        if self.unterminated_quote {
+            return Err(crate::Error::Crs("unterminated quoted PROJ value".into()));
+        }
+        Ok(())
     }
 
     /// Whether the parameter is present.
@@ -50,6 +62,27 @@ impl Params {
     pub fn list(&self, key: &str) -> Option<Vec<f64>> {
         self.str(key).map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
     }
+}
+
+/// The whitespace-separated tokens of a PROJ string, without the double quotes around values.
+fn tokens(s: &str) -> (Vec<String>, bool) {
+    let (mut out, mut token, mut quoted) = (Vec::new(), String::new(), false);
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                token.push('"');
+                chars.next();
+            }
+            // A quote opens a value right after `=`, and closes it; elsewhere it is a character,
+            // such as DMS seconds (`52d30'10"N`).
+            '"' if quoted || token.ends_with('=') => quoted = !quoted,
+            c if c.is_whitespace() && !quoted => out.extend((!token.is_empty()).then(|| std::mem::take(&mut token))),
+            c => token.push(c),
+        }
+    }
+    out.extend((!token.is_empty()).then_some(token));
+    (out, quoted)
 }
 
 /// Parses decimal degrees or PROJ's DMS notation into degrees.
@@ -92,11 +125,31 @@ mod tests {
     #[test]
     fn parses_tokens_and_angles() {
         let p = Params::parse("+proj=utm +zone=33 +south +towgs84=1,2,3 +lat_0=40d30'N");
+        p.validate_quoting().unwrap();
         assert!(p.has("south"));
         assert_eq!(p.f64("zone"), Some(33.0));
         assert_eq!(p.list("towgs84"), Some(vec![1.0, 2.0, 3.0]));
         assert!((p.angle("lat_0").unwrap().to_degrees() - 40.5).abs() < 1e-12);
         assert_eq!(parse_dms("-74.5"), Some(-74.5));
         assert_eq!(parse_dms("74d30W"), Some(-74.5));
+    }
+
+    #[test]
+    fn dms_seconds_are_not_quotes() {
+        let p = Params::parse(r#"+proj=tmerc +lat_0=52d30'10"N +lon_0=5d10'20"E +title="a b" +k=0.9996"#);
+        assert!((p.angle("lat_0").unwrap().to_degrees() - (52.0 + 30.0 / 60.0 + 10.0 / 3600.0)).abs() < 1e-12);
+        assert!((p.angle("lon_0").unwrap().to_degrees() - (5.0 + 10.0 / 60.0 + 20.0 / 3600.0)).abs() < 1e-12);
+        p.validate_quoting().unwrap();
+        assert_eq!((p.str("title"), p.f64("k")), (Some("a b"), Some(0.9996)));
+    }
+
+    #[test]
+    fn values_may_be_quoted() {
+        let p = Params::parse(r#"+proj="aea" +title="UTM ""zone"" 32"  +towgs84="1,2,3" +no_defs"#);
+        p.validate_quoting().unwrap();
+        assert_eq!(p.str("proj"), Some("aea"));
+        assert_eq!(p.str("title"), Some(r#"UTM "zone" 32"#));
+        assert_eq!(p.list("towgs84"), Some(vec![1.0, 2.0, 3.0]));
+        assert!(p.has("no_defs"));
     }
 }

@@ -322,6 +322,7 @@ impl SpatialRef {
     /// A CRS from a PROJ string such as `+proj=utm +zone=33 +datum=WGS84`.
     pub fn from_proj4(proj4: &str) -> Result<Self> {
         let p = params::Params::parse(proj4);
+        p.validate_quoting()?;
         if let Some(code) = p.str("init").and_then(|i| i.to_ascii_lowercase().strip_prefix("epsg:").and_then(|c| c.parse().ok())) {
             return Self::from_epsg(code);
         }
@@ -956,6 +957,10 @@ pub struct TransformOptions {
     pub allow_ballpark: Option<bool>,
     /// Require the best operation assuming all grids were available (GDAL's ONLY_BEST).
     pub only_best: bool,
+    /// Take the heights of 2D CRSs (without heights of their own) as ellipsoidal heights, so
+    /// that datum transformations change them, as GDAL does after `PromoteTo3D` on both CRSs.
+    /// By default they are kept as they are, as GDAL keeps them between 2D CRSs.
+    pub promote_to_3d: bool,
 }
 
 impl TransformOptions {
@@ -963,7 +968,7 @@ impl TransformOptions {
     pub fn from_strict_options<K: AsRef<str>, V: AsRef<str>>(items: &[(K, V)]) -> Result<Self> {
         for (key, _) in items {
             let key = key.as_ref();
-            if !key.eq_ignore_ascii_case("ALLOW_BALLPARK") && !key.eq_ignore_ascii_case("ONLY_BEST") {
+            if !["ALLOW_BALLPARK", "ONLY_BEST", "PROMOTE_TO_3D"].iter().any(|k| key.eq_ignore_ascii_case(k)) {
                 return Err(Error::InvalidArgument(format!("unknown coordinate operation option: {key}")));
             }
         }
@@ -983,6 +988,7 @@ impl TransformOptions {
             match key.to_ascii_uppercase().as_str() {
                 "ALLOW_BALLPARK" => out.allow_ballpark = Some(boolean()?),
                 "ONLY_BEST" => out.only_best = boolean()?,
+                "PROMOTE_TO_3D" => out.promote_to_3d = boolean()?,
                 _ => {}
             }
         }
@@ -1103,10 +1109,57 @@ impl Heights {
 }
 
 /// Picks and runs a geoid model for a point (degrees for the areas), `reverse` from heights to
-/// ellipsoidal heights.
-fn run_model(ops: &[std::sync::Arc<datum::Op>], p: datum::Point, reverse: bool) -> Option<datum::Point> {
+/// ellipsoidal heights. With the point, whether the operation that ran was a geoid model, rather
+/// than the operation without steps used when the model's grid is missing (which keeps heights
+/// as they are).
+fn run_model(ops: &[std::sync::Arc<datum::Op>], p: datum::Point, reverse: bool) -> Option<(datum::Point, bool)> {
     let (lon, lat) = (p.lon.to_degrees(), p.lat.to_degrees());
-    datum::transform_with(ops, |op, _| op.contains(lon, lat), |i| datum::run_op(&ops[i], p, reverse, true))
+    let applied = std::cell::Cell::new(false);
+    datum::transform_with(
+        ops,
+        |op, _| op.contains(lon, lat),
+        |i| {
+            datum::run_op(&ops[i], p, reverse, true).inspect(|_| {
+                applied.set(!ops[i].steps.is_empty());
+                route::note(Some(&ops[i]), reverse, route::OpKind::Vertical);
+            })
+        },
+    )
+    .map(|q| (q, applied.get()))
+}
+
+/// A coordinate operation a [`Transformer`] uses for a point: see [`Transformer::operation_at`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoordinateOperation {
+    /// The names of the transformations, in the order they run, joined by ` + ` as PROJ joins
+    /// them (`Inverse of OSGB36 to WGS 84 (6)`). Conversions (projections, units, axes) are not
+    /// named. PROJ's ballpark transformations are `Ballpark geographic offset` and
+    /// `Ballpark vertical transformation`.
+    pub name: String,
+    /// The accuracy in metres: the sum of the transformations' accuracies, as PROJ adds them;
+    /// `None` when one of them has none (a ballpark, a `+towgs84` definition).
+    pub accuracy: Option<f64>,
+    /// The grids the transformations interpolate in.
+    pub grids: Vec<String>,
+    /// Whether one of them is a ballpark: no datum shift, or heights kept as they are.
+    pub ballpark: bool,
+}
+
+impl CoordinateOperation {
+    fn from_used(used: Vec<route::Used>) -> Option<Self> {
+        if used.is_empty() {
+            return None;
+        }
+        let name = used.iter().map(|u| u.name.as_str()).collect::<Vec<_>>().join(" + ");
+        let accuracy = used.iter().try_fold(0.0, |sum, u| (u.accuracy >= 0.0).then_some(sum + u.accuracy));
+        let mut grids: Vec<String> = Vec::new();
+        for g in used.iter().flat_map(|u| u.grids.iter()) {
+            if !grids.contains(g) {
+                grids.push(g.clone());
+            }
+        }
+        Some(Self { name, accuracy, grids, ballpark: used.iter().any(|u| u.ballpark) })
+    }
 }
 
 impl Transformer {
@@ -1124,6 +1177,10 @@ impl Transformer {
     pub fn with_options(src: &SpatialRef, dst: &SpatialRef, opts: &TransformOptions) -> Result<Self> {
         let (mut s, mut d) = (Def::new(src)?, Def::new(dst)?);
         s.compatible_body(&d)?;
+        if opts.promote_to_3d {
+            s.promote_to_3d();
+            d.promote_to_3d();
+        }
         let cartesian_src = s.is_geocentric().then(|| s.clone());
         let cartesian_dst = d.is_geocentric().then(|| d.clone());
         if cartesian_src.is_some() {
@@ -1140,7 +1197,7 @@ impl Transformer {
         };
         let mut route = route::Route::new(&s, &d);
         if opts.allow_ballpark == Some(false) && !route.disallow_ballpark() {
-            return Err(Error::Crs("cannot find coordinate operations with ALLOW_BALLPARK=NO".into()));
+            return Err(Error::NoOperation("cannot find coordinate operations with ALLOW_BALLPARK=NO".into()));
         }
         let motion = match (s.datum_code(), opts.source_coordinate_epoch, opts.target_coordinate_epoch) {
             // Between geographic CRSs of the datum, as PROJ applies it (not to projected ones).
@@ -1262,7 +1319,7 @@ impl Transformer {
         self.flush_warnings();
         let flags = self.diagnostics.load(std::sync::atomic::Ordering::Relaxed);
         if self.policy.only_best && flags & 2 != 0 {
-            return Err(Error::Crs(
+            return Err(Error::MissingGrid(
                 "ONLY_BEST=YES: best coordinate operation needs a missing grid; set TERRIO_NETWORK=ON or TERRIO_GRID_DIR".into(),
             ));
         }
@@ -1300,7 +1357,7 @@ impl Transformer {
             self.record_operation(ideal, outside);
             if ideal.is_some_and(|op| !op.available()) {
                 self.diagnostics.fetch_or(2, std::sync::atomic::Ordering::Relaxed);
-                return Err(Error::Crs(
+                return Err(Error::MissingGrid(
                     "ONLY_BEST=YES: best coordinate operation needs a missing grid; set TERRIO_NETWORK=ON or TERRIO_GRID_DIR".into(),
                 ));
             }
@@ -1310,9 +1367,26 @@ impl Transformer {
             if self.policy.allow_ballpark == Some(false) { self.route.selected(&self.src, x, y, p).0 } else { None }
         };
         if self.policy.allow_ballpark == Some(false) && selected.is_none_or(|op| op.ballpark) {
-            return Err(Error::Crs("ALLOW_BALLPARK=NO: no non-ballpark coordinate operation for this point".into()));
+            return Err(Error::NoOperation("ALLOW_BALLPARK=NO: no non-ballpark coordinate operation for this point".into()));
         }
         Ok(selected)
+    }
+
+    /// Refuses keeping the heights of a vertical CRS as they are (PROJ's ballpark vertical
+    /// transformation) when no geoid model or vertical transformation applies to a point, as GDAL
+    /// does: with `ALLOW_BALLPARK=NO`, and with `ONLY_BEST=YES` when there was one (`operations`)
+    /// whose grid is missing or which does not cover the point.
+    fn check_vertical_policy(&self, operations: bool) -> Result<()> {
+        if self.policy.only_best && operations {
+            return Err(Error::MissingGrid(
+                "ONLY_BEST=YES: the best vertical operation does not apply (its grid is missing, or the point is outside it); set TERRIO_NETWORK=ON or TERRIO_GRID_DIR"
+                    .into(),
+            ));
+        }
+        if self.policy.allow_ballpark == Some(false) {
+            return Err(Error::NoOperation("ALLOW_BALLPARK=NO: no geoid model or vertical transformation applies to this point".into()));
+        }
+        Ok(())
     }
 
     /// The 2D transformation of a point, with its height kept (or, for transformations PROJ runs
@@ -1352,7 +1426,7 @@ impl Transformer {
         }
         .ok_or_else(fail)?;
         if refused_ballpark.get() {
-            return Err(Error::Crs("ALLOW_BALLPARK=NO: no non-ballpark coordinate operation for this point".into()));
+            return Err(Error::NoOperation("ALLOW_BALLPARK=NO: no non-ballpark coordinate operation for this point".into()));
         }
         let (tx, ty) = self.dst.project(q.lon, q.lat).ok_or_else(fail)?;
         Ok((tx, ty, q.h))
@@ -1369,6 +1443,20 @@ impl Transformer {
     /// transformations; the time replaces the coordinate epoch of the options.
     pub fn transform_4d(&self, x: f64, y: f64, z: f64, t: f64) -> Result<(f64, f64, f64)> {
         self.transform_at(x, y, z, Some(t))
+    }
+
+    /// The coordinate operation [`Transformer::transform_3d`] uses for a point: the
+    /// transformations between datums and vertical CRSs it runs, as PROJ's
+    /// `proj_trans_get_last_used_operation` gives them after transforming the point. `None` when
+    /// the point needs none (CRSs of one datum, without a vertical change). Fails as
+    /// `transform_3d` fails for the point, under the same options.
+    ///
+    /// The point is transformed to find out, so this costs a transformation; the result is not
+    /// kept, and the transformer is not changed (it can be shared between threads).
+    pub fn operation_at(&self, x: f64, y: f64, z: f64) -> Result<Option<CoordinateOperation>> {
+        let (result, used) = route::recording(|| self.transform_at(x, y, z, self.time));
+        result?;
+        Ok(CoordinateOperation::from_used(used))
     }
 
     fn transform_at(&self, x: f64, y: f64, z: f64, t: Option<f64>) -> Result<(f64, f64, f64)> {
@@ -1432,7 +1520,11 @@ impl Transformer {
                 match self.vertical_height(x, y, p) {
                     Some(h) => h / b.to_meter,
                     // None applies: heights are kept, as by PROJ's ballpark.
-                    None => b.height_of(a.to_metres(z)),
+                    None => {
+                        self.check_vertical_policy(true)?;
+                        route::note(None, false, route::OpKind::Vertical);
+                        b.height_of(a.to_metres(z))
+                    }
                 },
             ));
         }
@@ -1441,14 +1533,17 @@ impl Transformer {
         let _ = self.check_point_policy(x, y, datum::Point { lon, lat, h: z, t })?;
         let p0 = datum::Point { lon, lat, h: self.src.vertical().map_or(z, |v| v.to_metres(z)), t };
         // To ellipsoidal heights, on the source CRS or a geoid model's CRS.
-        let mut start = None;
+        let (mut start, mut geoid) = (None, false);
         for (i, ops) in &h.src.models {
             let q = match &h.src.routes[*i] {
                 Some(r) => r.apply(&self.src, x, y, p0, false),
                 None => Some(p0),
             };
-            if let Some(r) = q.and_then(|q| run_model(ops, q, true)) {
+            if let Some(q) = q
+                && let Some((r, applied)) = run_model(ops, q, true)
+            {
                 start = Some((*i, r));
+                geoid = applied;
                 break;
             }
         }
@@ -1456,12 +1551,21 @@ impl Transformer {
         if start.is_none() && self.src.vertical().is_some_and(|v| !v.ballpark) {
             return Err(fail());
         }
+        if self.src.vertical().is_some() && !geoid {
+            self.check_vertical_policy(!h.src.models.is_empty())?;
+        }
+        if start.is_none() && self.src.vertical().is_some() {
+            route::note(None, false, route::OpKind::Vertical);
+        }
         let (i, p) = start.unwrap_or((0, p0));
         let (sx, sy) = if i == 0 { (x, y) } else { (p.lon.to_degrees(), p.lat.to_degrees()) };
         // From ellipsoidal heights to the target.
         for (j, ops) in &h.dst.models {
             let Some(q) = h.middle(i, *j).apply(&h.src.defs[i], sx, sy, p, true) else { continue };
-            let Some(r) = run_model(ops, q, false) else { continue };
+            let Some((r, applied)) = run_model(ops, q, false) else { continue };
+            if !applied {
+                self.check_vertical_policy(true)?;
+            }
             let r = match &h.dst.routes[*j] {
                 Some(route) => route.apply(&h.dst.defs[*j], r.lon.to_degrees(), r.lat.to_degrees(), r, false).ok_or_else(fail)?,
                 None => r,
@@ -1471,6 +1575,10 @@ impl Transformer {
         }
         if self.dst.vertical().is_some_and(|v| !v.ballpark) {
             return Err(fail());
+        }
+        if self.dst.vertical().is_some() {
+            self.check_vertical_policy(!h.dst.models.is_empty())?;
+            route::note(None, false, route::OpKind::Vertical);
         }
         let q = h.middle(i, 0).apply(&h.src.defs[i], sx, sy, p, true).ok_or_else(fail)?;
         let (tx, ty) = self.dst.project(q.lon, q.lat).ok_or_else(fail)?;
@@ -1522,6 +1630,7 @@ impl Transformer {
                 None => Some(p),
             };
             if let Some(h) = q.and_then(|q| datum::run_op(op, q, false, true)).map(|r| r.h) {
+                route::note(Some(op), false, route::OpKind::Vertical);
                 return Some(h);
             }
             excluded.push(i);
@@ -2004,6 +2113,17 @@ mod tests {
         assert!(!def("+proj=longlat +pm=10 +ellps=intl").rotation_only_to(&def("+proj=longlat +lon_0=10 +ellps=intl")));
         // A projected CRS's central meridian is no `+lon_0` of a longlat CRS.
         assert!(def("+proj=tmerc +lon_0=28 +pm=ferro +ellps=bessel").rotation_only_to(&def("+proj=longlat +ellps=bessel")));
+    }
+
+    #[test]
+    fn latitudes_of_origin_beyond_the_poles_are_refused() {
+        // PROJ 9.9: "Invalid value for lat_0: |lat_0| should be <= 90°", from a PROJ string and WKT 2.
+        assert!(SpatialRef::parse("+proj=tmerc +lat_0=100 +lon_0=9 +k=0.9996 +x_0=500000 +datum=WGS84").is_err());
+        let wkt2 = r#"PROJCRS["x",BASEGEOGCRS["WGS 84",DATUM["World Geodetic System 1984",ELLIPSOID["WGS 84",6378137,298.257223563]]],CONVERSION["c",METHOD["Transverse Mercator",ID["EPSG",9807]],PARAMETER["Latitude of natural origin",100,ANGLEUNIT["degree",0.0174532925199433]],PARAMETER["Longitude of natural origin",9,ANGLEUNIT["degree",0.0174532925199433]],PARAMETER["Scale factor at natural origin",0.9996,SCALEUNIT["unity",1]],PARAMETER["False easting",500000,LENGTHUNIT["metre",1]],PARAMETER["False northing",0,LENGTHUNIT["metre",1]]],CS[Cartesian,2],AXIS["(E)",east,LENGTHUNIT["metre",1]],AXIS["(N)",north,LENGTHUNIT["metre",1]]]"#;
+        assert!(Transformer::new(&SpatialRef::parse(wkt2).unwrap(), &SpatialRef::from_epsg(4326).unwrap()).is_err());
+        // The poles themselves are origins.
+        assert!(SpatialRef::parse("+proj=stere +lat_0=-90 +lat_ts=-71 +datum=WGS84").is_ok());
+        assert!(SpatialRef::parse("+proj=laea +lat_0=90 +datum=WGS84").is_ok());
     }
 
     #[test]

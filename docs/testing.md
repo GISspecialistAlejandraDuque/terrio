@@ -50,8 +50,12 @@ python scripts/conformance.py ../terrio-data --remote --strict     # remote COGs
 | Window and overview reads | `scripts/compare_windows_with_gdal.py` | every overview level of every GeoTIFF, local and remote over `/vsicurl/` |
 | Indexed raster catalogs | `scripts/compare_catalogs_with_gdal.py` | Real DEM mosaics in GeoPackage/FlatGeobuf indexes: z-order, nodata, masks, partial alpha, mixed CRS and Terrio-written indexes read by GDAL GTI; an 8x8 HTTP query from 1,002 features checks opens/cache bounds and actual bytes for both implementations |
 | Raster operations | `scripts/compare_ops_with_gdal.py` | translate, warp (all resampling methods), mosaic and VRT against `gdal_translate`, `gdalwarp`, `gdalbuildvrt`, `gdal_merge.py` |
+| Raster comparison, pixel queries, XYZ | `scripts/compare_raster_query_with_gdal.py` | `terrio compare` vs `gdal raster compare` (report lines and exit status), `terrio pixel-info` vs `gdal raster pixel-info` (GeoJSON, CSV) and `gdallocationinfo` (text, `-valonly`), `terrio xyz` vs `gdal2xyz.py`, on real rasters and derived copies. Registered in conformance as `raster-query`. |
+| Pixel-wise raster commands | `scripts/compare_raster_pixel_with_gdal.py` | `gdal raster unscale`, `nodata-to-alpha`, `reclassify` (inline and `@file` mappings, ranges, `NO_DATA`, `NAN`, `DEFAULT`, `PASS_THROUGH`, `--ot`) and `as-features` (polygons, points, tables, `--skip-nodata`, `--include-xy`, `--include-row-col`) on USGS, Landsat, ECOSTRESS, NLCD and Sentinel-5P data: size, type, nodata, CRS, color interpretations, scales and every pixel, or every feature's fields and vertices. Registered in conformance as `raster-pixel`. |
+| Focal statistics, collars, enhancement | `scripts/compare_focal_with_gdal.py` | `gdal raster neighbors` (every kernel and method, matrices, types, nodata, the whole USGS DEM in strips), `nearblack` and `gdal raster clean-collar` (both algorithms, colors, thresholds, distances, alpha, masks, in-place updates) and `gdalenhance` (equalization, LUT file output and input) on Sentinel-2, Landsat 7 and USGS data: pixels, masks, type, nodata, geotransform, LUT text |
 | Vector operations | `scripts/compare_vector_ops_with_gdal.py` | `ogr2ogr` filters, `gdal_rasterize` and `gdal_polygonize.py` |
 | Vector topology | `scripts/compare_topology_with_gdal.py` | Tennessee county polygons and Las Vegas roads projected to metre-based CRSs: buffer, all four polygon overlays, dissolve, validity, repair of a deliberately corrupted county boundary and snap cleanup against GDAL/GEOS; attributes, source IDs and CRS, with relative symmetric-difference area tolerance 1e-7 (5e-4 for buffer curves). Registered in conformance as `topology`. |
+| Vector dataset commands | `scripts/compare_vector_dataset_with_gdal.py` | `concat` (all modes, source-layer fields, intersection, reprojection; also `ogrmerge.py -single`), `partition` (Hive and flat, string and integer fields, feature limits, patterns), `set-field-type` (a 77-conversion matrix of edge values, every type to every type, and conversions of real fields), `make-point` (GPS trace, places with Z), `create` (`--like`, `--schema`, fields) and `export-schema` (GeoPackage, Shapefile, GeoJSON, FlatGeobuf, GeoParquet) plus `rename-layer`, `edit` and `update`, against GDAL 3.13.3's vector commands/API, OGRLayer::Rename and `ogrinfo -json`; GeoPackage validity and R-tree checks: values exact, coordinates within 1e-9 degrees (or 1e-6 metres) after reprojection; Int16, Float32 and JSON subtypes are reported within tolerance. Registered in conformance as `vector-dataset`. |
 | Terrain and raster algebra | `scripts/compare_dem_calc_with_gdal.py` | every `gdaldem` mode and option, `gdal_calc.py` expressions, types, nodata and extents, `gdal_proximity.py`, `gdal_sieve.py` |
 | STAC and GeoZarr | `scripts/compare_stac_geozarr.py` (`stac`, `stacta`, `geozarr`) | STACIT subdatasets, mosaic sizes, geotransforms, CRSs and windows on Earth Search; STACTA items (GDAL's test data and pyramids `gdal raster tile` writes from real rasters, local, over HTTP and with a missing tile): summaries, subdatasets, metadata, whole rasters, windows and overviews vs GDAL's STACTA driver; STAC footprint fields vs `ogrinfo`; GeoZarr stores read by GDAL and rioxarray, overviews vs `gdaladdo` |
 | Remote Zarr stores | `scripts/compare_remote_zarr.py` | public cloud stores read in place (EOPF Sentinel-2 Zarr v2, EOPF GeoZarr v3 with shards and value codecs, NOAA HRRR on S3, CMIP6 on Google Cloud Storage, Daymet on Azure, a sharded store on a local port): sizes, geotransforms, nodata vs `gdalinfo` (`/vsicurl/`, `/vsis3/`, `/vsigs/`, `/vsiaz/`), windows vs `gdal_translate` and xarray, overviews vs xarray, bytes and requests fetched |
@@ -67,6 +71,12 @@ python scripts/conformance.py ../terrio-data --remote --strict     # remote COGs
 | Coordinate transformations | `crates/terrio-crs/tests/epsg_accuracy.rs` | a point per EPSG CRS, forward, inverse and between CRSs, vs GDAL |
 | Chains through intermediate datums | `crates/terrio-crs/tests/crs_chains.rs`, `scripts/compare_chains_with_proj.py` | every pair of EPSG geographic 2D CRSs on two datums no transformation links directly whose areas overlap, and a projected CRS of each datum, without and with grids, vs GDAL |
 | Datum shift grids, geoid models, epochs | `crates/terrio-crs/tests/epsg_accuracy_grids.rs`, `crates/terrio-crs/tests/crs_grids.rs`, `scripts/compare_crs_grids_with_gdal.py` | the same EPSG points with the grids of `scripts/proj_grids.txt`; random points through every grid (forward and inverse), legacy NTv2 and GTX files, NADCON5 and geocentric grids, compound CRSs and coordinate epochs, vs GDAL with the same grids |
+
+A local HTTP check of XYZ `--skip 64` on the 51,486,544-byte USGS GeoTIFF
+transferred 38,248,272 bytes in 9 requests before and after block-aware sampling.
+All 3,249 output lines were byte-identical. One run of each optimized CLI took
+3.89 s before and 1.07 s after; these are local observations rather than a timing
+threshold in the test suite.
 
 ## Results
 
@@ -88,6 +98,9 @@ The [Conformance](conformance.md) page has the full, generated results; in short
 | Histograms | 84 of 84 cases identical to `gdalinfo -hist` (21 rasters of every type) |
 | `calc` | 35 of 37 cases identical; the other two within one float32 rounding step (NumPy's vectorized float32 `sin`, `exp`, `log10`, `arctan2`) |
 | `proximity`, `sieve` | 13 of 13 cases identical |
+| `compare`, `pixel-info`, `xyz` | GDAL 3.13.3: compare 20 of 21 and xyz 11 text cases identical, plus one shared refusal of non-finite integer nodata; one documented mask-count report difference; pixel-info 64 of 67 identical, 3 within 4e-14 relative (projection arithmetic, one scale/offset ULP) |
+| `unscale`, `nodata-to-alpha`, `reclassify`, `as-features` | 30 of 31 cases identical to GDAL 3.13.3's `gdal raster` commands (pixels or features, types, nodata, CRS, color interpretations, scales and affine transforms); the Sentinel-5P case has identical pixels and metadata but a known default-grid difference (reported as within tolerance). An unexpected affine transform fails comparison. Known differences: netCDF default geotransform, selected bands vs GDAL reporting all bands, default layer names, unsupported as-features update/layer options and nodata-to-alpha masks (see [CLI scope](cli.md#as-features)); a missing reference netCDF driver is an explicit case error, and repeated bands, Float32 nodata-adjacent samples, packed grayscale color interpretations, Float64 input converted to Float32 working pixels, and OGR field types are covered. |
+| `neighbors`, `nearblack`/`clean-collar`, `enhance` | 103 of 103 cases identical (27, 58 and 18) to `gdal raster neighbors`, `nearblack`, `gdal raster clean-collar` and `gdalenhance`, pixels and masks; one in-place alpha case compared with GDAL's new-file output (GDAL writes stale alpha values) |
 | STAC and GeoZarr | 16 of 16 STAC checks (subdatasets, mosaics and windows identical to GDAL STACIT's, 328 footprint fields as `ogrinfo`'s), 99 of 99 STACTA checks (summaries, subdatasets and metadata as `gdalinfo`'s; whole rasters, windows and every overview identical to GDAL STACTA's on its 7 test items and on `gdal raster tile` pyramids of a DEM and a Landsat scene, local, over HTTP and with a missing tile) and 60 of 60 GeoZarr checks |
 | Remote Zarr stores | 45 of 45 checks on six public and served stores: sizes, geotransforms and nodata as `gdalinfo`'s; every window identical to `gdal_translate`'s (`/vsicurl/`, `/vsis3/`, `/vsigs/`, `/vsiaz/`) and xarray's, GeoZarr multiscales overviews identical to xarray's levels; windows 2 to 15 times faster than GDAL's |
 | Point clouds | 485 of 485 checks: every value identical to laspy; COPC queries and grids identical to PDAL |
@@ -140,6 +153,32 @@ separable kernels, and affine/reprojection/GCP/TPS/homography/RPC transforms:
 python scripts/conformance.py ../terrio-data --only vrt --strict
 ```
 
+### Focal statistics, collars and enhancement against GDAL
+
+```sh
+cargo test -p terrio --lib -- neighbors nearblack enhance kernel
+cargo test -p terrio-cli --test focal --test mcp
+python -m pytest python/tests/test_focal.py
+node --test --test-name-pattern='neighbors, collar' js/tests/node.test.mjs
+python scripts/compare_focal_with_gdal.py ../terrio-data
+python scripts/conformance.py ../terrio-data --only focal --strict
+```
+
+The `focal` suite runs 27 `gdal raster neighbors` cases (every built-in kernel, `equal` with
+every method on a DEM with deliberate nodata holes, matrices, several kernels and methods at
+once, output types and nodata, and two cases on the whole 3612x3612 USGS DEM, which Terrio
+reads and writes in four strips), 58 `nearblack`/`gdal raster clean-collar` cases (the
+Sentinel-2 L2A true-color image's orbit-edge collar and the Landsat 7 scene, also with an alpha
+band and with a mask; both algorithms, colors, thresholds, distances, alpha, masks and in-place
+updates, including preserving an existing mask without mask flags) and 18 `gdalenhance` cases (equalization, LUT file text and enhancement with a LUT
+file read back, on Byte, UInt16 and Float32 inputs, plus six real-DEM-derived Float64 nodata conversion cases). All 103 are identical with tolerance 0:
+every pixel, mask, type, nodata and geotransform, and LUT files token by token. One case is
+compared differently: GDAL 3.12.2's in-place flood fill of a raster with an alpha band reads only
+the color bands into its line buffer and writes the buffer's stale alpha values back on every
+modified line (2,715,128 of the Landsat 7 scene's 4,180,977 alpha values become 0). That case
+compares the color bands with GDAL's update and Terrio's alpha band with GDAL's output of the
+same cleaning to a new file.
+
 ### Pansharpening against GDAL
 
 The fetch script downloads Landsat 8 B8/B4/B3/B2 real image pairs from the public
@@ -166,6 +205,51 @@ the development CLI's peak RSS fell from 125,544 KiB to 101,824 KiB with the sha
 block implementation and streamed TIFF output, measured with two Rayon threads.
 These are fixture measurements, not memory or transfer guarantees for every codec.
 
+### Vector gridding and linear referencing against GDAL
+
+`compare_vector_grid_with_gdal.py` grids Natural Earth's populated places (769 United States
+places, above GDAL's 100-point quadtree threshold, and 89 Peruvian ones, below it), GDAL's
+`gdal_grid` test points (a regular grid, with many equidistant points) and a 4,400-point subset
+of the Autzen lidar (3D) with every algorithm, ellipse, rotation, point limit and per-quadrant
+limit, and every option, and compares every pixel, the type, nodata and geotransform with
+`gdal_grid` (run with `GDAL_USE_AVX=NO GDAL_USE_SSE=NO`, GDAL's double-precision code; one case
+compares its default SIMD code within a tolerance). In a local environment with GDAL 3.13.3: 109
+cases, 102 identical, 5 within tolerance (`linear` on scattered points, 4.7e-9 on populations of
+1e7 and 1.7e-13 on elevations, identical in Float32; the SIMD `invdist`, single precision, up to
+265 on populations) and 2 differing (`linear` on the regular grid off its nodes, 229 of 400 and
+1261 of 2451 pixels, where qhull breaks co-circular ties differently). GDAL 3.12 scans every
+point for a rotated ellipse where 3.13 searches its quadtree: against 3.12.2 a rotated
+`average_distance` also differs, by 1.1e-15.
+
+`compare_lineref_with_gdal.py` runs `ogrlineref` and `terrio lineref` on GDAL's test route and
+milestones (geographic, reprojected to UTM, and as two routes told apart by a field, one drawn
+backwards): the parts feature by feature, the printed positions and coordinates, and sublines
+vertex by vertex. 72 cases: 69 identical, 3 within tolerance (the UTM lengths of a geographic
+route's end parts, including the first-NULL-route case, 1.1e-11 to 3.8e-11, from
+terrio's projection rather than PROJ). NULL middle parts are skipped identically to GDAL.
+
+Linear referencing skips infinite milestone positions with a warning before part generation;
+the GDAL 3.13.3 probe did not terminate within five seconds. NULL begin fields in position
+lookup follow OGR numeric NULL-as-zero semantics. Coordinate/subline selection retains OGR
+filter semantics, so NULL starts are not selected there. A GDAL NaN-scale GeoJSON probe returns
+the final vertex for coordinates and the complete last part for multi-part sublines.
+The core in-memory algorithm retains those results. Terrio's GeoJSON reader rejects bare
+NaN tokens; SQLite/GeoPackage persists NaN as NULL.
+
+A 10,001-point fixture with 10,000 coincident XY positions completes a 2x2 nearest grid with
+a search ellipse in 0.094 seconds (78,364 KiB peak child RSS on this machine). This limited
+probe does not establish bounds for larger duplicate-heavy inputs; quadtree order remains GDAL-compatible.
+
+```sh
+python scripts/compare_vector_grid_with_gdal.py ../terrio-data
+python scripts/compare_lineref_with_gdal.py ../terrio-data
+python scripts/conformance.py ../terrio-data --only vector-grid,lineref
+cargo test -p terrio --lib -- vector_grid lineref
+cargo test -p terrio-cli --test mcp vector_grid
+python -m pytest python/tests/test_vector_grid.py
+node --test --test-name-pattern='vectorGrid' js/tests/node.test.mjs
+```
+
 ## Build size and iteration speed
 
 Development and test builds omit debug symbols by default. Enable full debugger
@@ -184,6 +268,22 @@ package builds for final validation.
 CI saves dependency caches for PR updates as well as main, disables incremental
 compilation, and cancels obsolete runs when a PR receives a newer push. Release
 profiles and the full validation matrix are unchanged.
+
+Every push to main runs every job. Pull requests skip the slowest ones unless
+asked for them:
+
+| Job | Pull requests |
+| --- | --- |
+| real data vs GDAL (`ci.yml`) | Runs unless the PR changes only docs, Markdown, `js/` (other than its Rust code), `packaging/` or other workflows |
+| npm package (`ci-extended.yml`) | Label `ci:npm` or `ci:all`; the `wasm` job tests the Node.js package on every PR |
+| point clouds and conformance vs GDAL (`ci-extended.yml`) | Label `ci:conformance` or `ci:all` |
+| macOS and Windows (`ci-platforms.yml`) | Label `ci:macos`, `ci:windows` or `ci:all` |
+
+A label starts its jobs when added and reruns them on each push while it stays.
+`ci-extended.yml` and `ci-platforms.yml` can also be run by hand from GitHub
+Actions. Add
+`ci:npm` to PRs that change the npm build or WebAssembly-sensitive code, and
+`ci:conformance` to GDAL-parity work.
 
 ## Benchmark harness regressions
 
@@ -227,7 +327,7 @@ python -m unittest discover -s scripts/tests -v
 
 These tests exercise benchmark correctness gates, independent CPU-budget selection,
 interleaved measurements and Linux affinity/background-load handling. They run in
-CI's conformance job without downloading benchmark datasets or asserting timing
+CI's real-data job without downloading benchmark datasets or asserting timing
 thresholds. Performance measurements remain an explicit local task; see
 [Benchmarks](benchmarks.md) for the methodology and latest GDAL version used.
 
@@ -498,7 +598,6 @@ the original JSON definitions. Rust regressions also
 check file loading, malformed/unsupported definitions, wrong units/dimensions,
 and that a root authority ID cannot overwrite a caller's false easting.
 
-
 ## IAU_2015 authority support (#271)
 
 `iau-source.json` records the registry version, PROJ source revision and
@@ -541,7 +640,6 @@ planetocentric latitude conversion and rejection of Earth datum operations on
 planetary coordinates. The numerical fixes use PROJ's sixth-order meridian
 series, inverse authalic-latitude refinement and inverse normalization order;
 the copied formulas and tables are attributed in `NOTICE`.
-
 
 The sixth-order meridian series also changes Earth calculations. A WGS 84
 latitude sweep from -90 to 90 degrees in 0.001-degree increments, comparing
@@ -589,6 +687,55 @@ node --test --test-name-pattern='perspective projections' js/tests/node.test.mjs
 python scripts/conformance.py ../terrio-data --only perspective --strict
 ```
 
+## Two-point oblique Mercator coverage (#272)
+
+`omerc_two_point_benchmark.json` retains `method-omerc-2pt` from
+rust-proj-capability revision `ddd9fac70ec370acd9651ebb8b46035207347ad5`, with its
+PROJ 9.9.0 oracle. `omerc_two_point_reference.json` is generated by
+`scripts/gen_omerc_two_point_reference.py` with GDAL 3.12.2 / PROJ 9.8.1, without
+network access: 12 lines on a sphere and on WGS 84 (both hemispheres, the points
+swapped, across the antimeridian, near a meridian; metres, kilometres and US survey
+feet; scale factors and false offsets) and 1,524 geographic samples, with GDAL's
+WKT2, WKT1 and ESRI WKT1 of each, and six definitions PROJ refuses.
+
+Rust checks the corpus in every encoding, terrio's own WKT1, the fixture and the
+refusals; Python and Node/WASM check every sample and the refusals; CLI/MCP check
+the fixture and a refusal. The live `omerc-two-point` conformance suite compares
+the PROJ string and the three WKT encodings with GDAL, and the refusals. A forward
+point fails only at the two poles of the line, which no sample hits.
+
+```sh
+cargo test -p terrio-crs --test omerc_two_point
+cargo test -p terrio-cli --test mcp two_point_oblique_mercator
+python -m pytest python/tests/test_omerc_two_point.py
+node --test --test-name-pattern='two-point oblique Mercator' js/tests/node.test.mjs
+python scripts/conformance.py ../terrio-data --only omerc-two-point --strict
+```
+
+## Vector geometry commands (#289)
+
+`simplify`, `segmentize`, `convex-hull`, `concave-hull`, `swap-xy`, `set-geom-type`,
+`combine` and `sort` have unit tests of the GEOS/OGR behaviours they port (ring endpoint
+simplification, jump checks, OGR's segmentize direction and Z/M copies, `forceTo` dimensions,
+Graham scan ring order, concave hull areas, Hilbert codes from GDAL's C code), CLI tests of the
+streamed and whole-layer paths and refusals, and Python, Node/WASM and MCP tests. The
+`vector-geom` conformance suite compares them on Tennessee and US counties, Las Vegas roads and
+Natural Earth countries and places with `gdal vector` (GDAL 3.12.2) for simplify, segmentize,
+swap-xy, set-geom-type and `ogr2ogr -simplify/-segmentize`, coordinate by coordinate; with
+OGR's `ConvexHull` (canonical WKB), `ConcaveHull` (edge sets) and GEOS's `GEOSConcaveHullOfPolygons_r` (ctypes) for polygon hulls,
+by edge sets; and, as GDAL 3.12 has no combine or sort, with Python references of GDAL 3.13's
+algorithms (GEOS's own STR tree for `--method strtree`). It needs the `gdal` command and the
+osgeo bindings.
+
+```sh
+cargo test -p terrio --lib -- ops::simplify ops::hull ops::vector_geom
+cargo test -p terrio-cli --test processing
+cargo test -p terrio-cli --test mcp vector_geometry
+python -m pytest python/tests/test_vector_geom.py
+node --test --test-name-pattern='vector geometry' js/tests/node.test.mjs
+python scripts/conformance.py ../terrio-data --only vector-geom
+```
+
 ## Lazy GeoTIFF metadata and external overviews
 
 The `lazy-geotiff` conformance suite runs the Rust regressions for sample bit
@@ -616,3 +763,58 @@ python scripts/conformance.py ../terrio-data --only lazy-geotiff --strict
 `LazyRaster::rpc`, `file_list` and `sample_bits` are Rust APIs. Python and
 JavaScript exposure of these additional lazy-reader facts remains follow-up
 work; the existing bindings retain their behavior.
+
+## Raster query I/O (#289)
+
+A before/after local HTTP range-server probe uses the real 610,612-byte `cog.tif` fixture.
+Ordinary lazy info opens use one request and 65,536 served body bytes in both builds.
+Comparison of two distinct URLs for the same raster uses four requests and 1,221,224 bytes;
+XYZ export with skip 3 uses two requests and 610,612 bytes. Reports and XYZ text agree in
+the two builds. These are measurements for this fixture, not a claim for every raster.
+Comparison-only out-of-line TIFF tags are now read by the comparison helper; ordinary lazy
+opens do not fetch them. Comparison and XYZ strips reuse the shared block-aligned row sizing.
+
+## Vector dataset commands (#289)
+
+`concat`, `partition`, `set-field-type`, `make-point`, `create`, `export-schema`,
+`rename-layer`, `edit` and `update` are checked against GDAL 3.13.3. The complete suite
+requires GDAL 3.13 or newer and reports an explicit skip for older references. Renames use
+OGRLayer::Rename, edits use `gdal vector edit`, and updates use GDAL's update API, with
+GeoPackage validity and R-tree checks. The datasets include Las Vegas roads, countries,
+counties, places and a GPS trace. GDAL's union layers merge later fields into the wrong
+field when a source-layer field is added; that case compares with GDAL's output without
+the source-layer field. The integer-subtype waiver applies only to values in field `i`;
+feature counts, other values, field names, CRS and geometries remain strict gates.
+
+```sh
+cargo test -p terrio --lib -- vector_schema concat partition make_point
+cargo test -p terrio-cli --test vector_dataset --test mcp
+python scripts/conformance.py ../terrio-data --only vector-dataset --strict
+python -m pytest python/tests/test_vector_dataset.py
+node --test --test-name-pattern='vector dataset commands' js/tests/node.test.mjs
+```
+
+The vector-dataset comparison gives GDAL and Terrio the same installed PROJ grid
+paths, disables grid downloads, and isolates per-user grid caches. This avoids
+comparing results from different datum grids. Grid availability and network grid
+reads are validated separately by the coordinate transformation suites. Unicode
+rename fixtures are inventoried with SQLite and OGR's WKB parser: GDAL 3.13.3 can
+raise `Cannot find table` during GPKG introspection for these names even in its own
+outputs; table names, schema, attributes, CRS and geometries are still compared.
+
+## Release rehearsal
+
+The full release dry run is manual: select **Release dry run → Run workflow** in
+GitHub Actions before tagging a release. It builds the complete cross-platform
+wheel, CLI, installer and npm matrix without publishing. Pull requests retain the
+normal CI checks, including Python, WASM, API documentation and package validation.
+
+
+
+## Pixel-operation buffer checks
+
+When changing typed output-buffer paths, measure peak RSS before and after with the same
+multiband fixture, build profile and thread count. Compare every output pixel, type, nodata
+value and georeferencing value as well as memory use. Record fixture details and observations
+in the PR validation notes; they are not runtime or general memory guarantees. These operations
+still materialize input and output, so eliminating intermediates does not make them streaming.

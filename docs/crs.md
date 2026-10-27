@@ -156,6 +156,22 @@ GeoKeys of PDAL's `autzen_trim.las`, on NAD83(HARN), give NAD83(HARN) / Oregon G
 (EPSG:2994), not the same projection on NAD83, and a UTM zone on such a datum is that datum's.
 The same GeoKeys are read in LAS files.
 
+## PROJ string interpretation changes
+
+PROJ strings supplied as CRSs follow PROJ's CRS import rules. For polar
+`+proj=stere` with `+lat_0=90` or `-90`, an explicit `+lat_ts` selects the
+hemisphere: negative selects south, and zero or positive selects north. For
+example, `+lat_0=-90 +lat_ts=90` now describes the north pole. This differs from
+PROJ's bare stereographic operation, which takes the hemisphere from `lat_0`.
+Use a negative `lat_ts` for a southern standard parallel. Terrio's CRS API does
+not interpret these strings as raw projection operations.
+
+For `+proj=lcc +lat_1=X` with neither `lat_0` nor `lat_2`, CRS import supplies
+zero for both omitted parameters. Earlier Terrio versions used X for both,
+matching a bare projection operation instead. Supply `+lat_0=X +lat_2=X`
+explicitly to retain that tangent-cone definition. Coordinates from previously
+ambiguous strings can change substantially under these corrected CRS rules.
+
 ## Transformations
 
 ```sh
@@ -178,6 +194,16 @@ default operations do. Bounds are transformed with densified edges, so curved ed
 CRS are covered. `scripts/gen_epsg_points.py` writes GDAL's results for every EPSG CRS, which
 `crates/terrio-crs/tests/epsg_accuracy.rs` checks terrio against (see the
 [conformance report](conformance.md)).
+
+`Transformer::operation_at(x, y, z)` returns the transformations `transform_3d` runs for a point,
+as PROJ's `proj_trans_get_last_used_operation`: their names, summed accuracy, grids and whether one
+is a ballpark, or `None` between CRSs of one datum. Conversions (projections, units) are not
+named, and geoid models are named without PROJ's EPSG index (`WGS 84 to EGM96 height`).
+
+```rust
+let t = terrio_crs::Transformer::new(&SpatialRef::parse("EPSG:27700")?, &SpatialRef::parse("EPSG:4326")?)?;
+let op = t.operation_at(530000.0, 180000.0, 0.0)?;   // "OSGB36 to WGS 84 (9)", 1 m, OSTN15
+```
 
 ### Datum shift grids
 
@@ -233,6 +259,11 @@ before OSGM15 for British National Grid with ODN heights), and 3D datum transfor
 ellipsoidal heights. Vertical units (US survey feet) and depths are converted. When no geoid
 model applies, heights are kept, as PROJ's ballpark vertical transformation does. Between 2D CRSs,
 heights are kept as GDAL keeps them (or transformed, for the pipelines PROJ runs on heights).
+With `TransformOptions { promote_to_3d: true, .. }` (Rust), the heights of 2D CRSs are ellipsoidal
+heights that datum transformations change, as GDAL gives them after `PromoteTo3D`: EPSG:28992
+(85000, 447000, 0) is 43.576 m above the WGS 84 ellipsoid in EPSG:4979, where it stays 0 by default. Vector layer
+conversions pass existing Z values through the promoted transformer and preserve
+2D input geometries as 2D, matching OGR geometry transformation.
 
 `Transformer::transform_3d` in Rust, `transform_points(xs, ys, src, dst, zs)` in Python,
 `transformPoints(xs, ys, src, dst, zs)` in JavaScript and `x y z` lines on `terrio crs`'s
@@ -571,3 +602,21 @@ domain boundaries, metres/kilometres/US survey feet, offsets and non-default
 origins/tilt/azimuth. Component allowances are 1 mm projected and 1e-8 degrees
 inverse, with longitude weighted by cos(latitude) at the poles. Other projection
 families in #272 remain tracked there.
+
+## Two-point oblique Mercator
+
+`+proj=omerc` without `+alpha` or `+gamma` takes its centre line through two
+points, `+lat_1`/`+lon_1` and `+lat_2`/`+lon_2`, as PROJ does: the azimuth and
+the central meridian are derived from them, and `+lon_0` is ignored. The
+formulas are PROJ 9.8.1's (`omerc.cpp`), on a sphere or an ellipsoid, with
+`+lat_0`, `+k`, `+units`, `+x_0` and `+y_0`. PROJ's checks apply: neither point
+at a pole, different latitudes, a first point off the equator and `+lat_0` off a
+pole. A point left out is 0, as PROJ reads it; a value that isn't a number is
+refused, where PROJ would read it as 0.
+
+GDAL's WKT1 `Hotine_Oblique_Mercator_Two_Point_Natural_Origin`, with GDAL's
+(`latitude_of_point_1`) or ESRI's (`Latitude_Of_1st_Point`) parameter names, and
+WKT2 `Hotine Oblique Mercator Two Point Natural Origin` are read, and terrio
+writes the former, as GDAL does. The `method-omerc-2pt` fixture keeps its PROJ
+9.9.0 oracle; a GDAL 3.12.2 / PROJ 9.8.1 corpus covers 12 lines and 1,524
+samples (see Testing). Allowances are 1 mm projected and 1e-8 degrees inverse.

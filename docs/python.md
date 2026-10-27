@@ -168,6 +168,12 @@ ndvi = terrio.calc("(B - A * 1.0) / (B + A * 1.0)", A="landsat.tif", A_band=3, B
                    type="Float32")  # like gdal_calc.py, with NumPy's typing rules
 dist = terrio.proximity("roads.tif", values=[1], distunits="GEO")
 clean = terrio.sieve("landcover.tif", threshold=10, connectedness=8)
+max5 = terrio.neighbors("dem.tif", kernel="equal", size=5, method="max")  # like gdal raster neighbors
+edges = terrio.neighbors("image.tif", kernel=["gaussian", "edge2"], band=2, ot="Float32")
+collar = terrio.clean_collar("scene.tif", "clean.tif", add_alpha=True)  # like gdal raster clean-collar
+masked = terrio.nearblack("scene.tif", "nb.tif", colors=["0,0,0"], add_mask=True)  # like nearblack
+text = terrio.enhance_luts("image.tif", config="lut.txt")  # gdalenhance -equalize -config lut.txt
+eq = terrio.enhance("image.tif", "eq.tif", equalize=True)  # or config="lut.txt", src_scale=(0, 4000)
 xs, ys = terrio.transform_points([699960], [3900000], "EPSG:32610", "EPSG:4326")
 xs, ys, hs = terrio.transform_points([-100], [40], "EPSG:4979", "EPSG:4326+5773", [100])  # EGM96
 xs, ys, hs = terrio.transform_points([135], [-25], "EPSG:7912", "EPSG:7843", [0], s_coord_epoch=2010.0)
@@ -176,6 +182,13 @@ terrio.set_grid_search_paths(["/data/proj-grids"])  # where datum shift grids ar
 data = open("dem.tif", "rb").read()
 raster = terrio.open_bytes(data, "dem.tif")  # from bytes; to bytes with raster.to_bytes("x.tif")
 ```
+
+`clean_collar` and `nearblack` return a Byte `Raster`; a mask (`add_mask`, or an input's mask
+kept by `clean_collar`) needs `dst`, which holds it, and the returned `Raster` is then read from
+`dst` (`has_mask`, `read_mask`). In-place updates are a command-line feature
+(`terrio clean-collar --update`). See [neighbors](cli.md#neighbors),
+[clean-collar](cli.md#clean-collar-and-nearblack) and [enhance](cli.md#enhance) for the
+options, GDAL's arithmetic and the known differences.
 
 ### Pansharpening
 
@@ -200,6 +213,122 @@ height = terrio.viewshed("dem_utm.tif", 500000, 4400000, om="GROUND", cc=0)
 `om="NORMAL"` returns visibility; `DEM` and `GROUND` return minimum visible elevation
 or height above the DEM. `cc` is 1 minus refraction. See [viewshed](cli.md#viewshed) for
 units, curvature, radius cropping and input nodata behavior.
+
+### Vector gridding and linear referencing
+
+```python
+temp = terrio.vector_grid("stations.gpkg", "temp.tif", algorithm="invdist", zfield="temp",
+                          power=2, radius=50000, max_points=12)
+dem = terrio.vector_grid("samples.gpkg", algorithm="linear", extent=(636000, 848930, 637180, 849500),
+                         resolution=(5, 5))
+parts = terrio.lineref_create("path.shp", "mstones.shp", "pos", 1000, "parts.gpkg")
+pos = terrio.lineref_position(parts, -1.4345, 51.9497)
+(x, y, z), = terrio.lineref_coordinates(parts, 15977.724709)
+sub = terrio.lineref_subline(parts, 13300, 17400)
+```
+
+`vector_grid` takes the algorithm (a name or a GDAL string) and its parameters as keywords
+(`power`, `smoothing`, `radius`, `radius1`, `radius2`, `angle`, `min_points`, `max_points`,
+`min_points_per_quadrant`, `max_points_per_quadrant`, `nodata`), with `zfield`, `zoffset`,
+`zmultiply`, `layers`, `sql`, `where`, `bbox`, `extent`, `size`, `resolution`, `ot` and `crs`.
+See [vector-grid](cli.md#vector-grid) and [lineref](cli.md#lineref).
+
+Repeated lookups should reuse `terrio.open_vector(parts_path)` or a Layer. Passing a path,
+serialized bytes or GeoJSON each time reopens/reparses the input.
+
+
+### Compare, pixel info and XYZ
+
+```python
+report = terrio.compare("reference.tif", "output.tif", skip_binary=True)
+print(report["difference_count"], [d["message"] for d in report["differences"]])
+print(report["bands"][0]["pixels_differing"], report["bands"][0]["max_abs_diff"])
+
+values = terrio.pixel_info("dem.tif", [(-105.5, 39.5, "site A")], position_crs="EPSG:4326", resampling="bilinear")
+print(values["features"][0]["properties"]["bands"][0]["raw_value"])
+print(terrio.pixel_info("dem.tif", position_dataset="sites.gpkg", format="csv"))
+
+terrio.xyz("dem.tif", "dem.xyz", skip_nodata=True)  # number of lines written
+text = terrio.xyz("dem.tif", srcwin=(0, 0, 10, 10))
+```
+
+`compare` takes paths or `Raster`s (two paths for the binary, RPC and subdataset comparisons)
+and returns `terrio compare --json`'s report. `pixel_info` returns GeoJSON (a dict), `json` (a
+list), or `csv`, `text` and `value` strings; `xyz` returns the line count written to `dst`, or
+the text. See [compare](cli.md#compare), [pixel-info](cli.md#pixel-info) and [xyz](cli.md#xyz)
+for options, GDAL agreement and differences.
+
+`pixel_info(..., format="value", field_sep="|")` selects the separator between
+band values. `pixel_info(..., dst="samples.gpkg", output_format="GPKG")` also
+writes a vector layer of sample points and returns the requested report as usual.
+Missing/off-raster samples are retained as null values. Input paths cannot be used
+as the output. JavaScript hosts can serialize the GeoJSON result through a Dataset
+when they need file bytes; direct local file paths are a native API feature.
+
+### Vector datasets
+
+```python
+merged = terrio.concat(["countries.gpkg", "us_counties.gpkg"], "merged.gpkg", mode="single",
+                       source_layer_field_name="source", dst_crs="EPSG:3857")
+files = terrio.partition("counties.gpkg", "out", ["STATE"], feature_limit=1000)  # paths written
+typed = terrio.set_field_type("countries.gpkg", "Integer64", field_name="POP_EST")
+points = terrio.make_point("trace.csv", "longitude", "latitude", crs="EPSG:4326")  # a Layer
+schema = terrio.export_schema("countries.gpkg")  # the OGR_SCHEMA dict
+terrio.create_vector("empty.gpkg", schema=schema)
+terrio.create_vector("sites.gpkg", output_layer="sites", geometry_type="POINT", crs="EPSG:4326",
+                     fields=["name:STRING(80)", "visits:INTEGER"])
+```
+
+These are `terrio concat`, `partition`, `set-field-type`, `make-point`, `export-schema` and
+`create` (GDAL's `gdal vector` commands of the same names); sources are paths or vector data in
+memory (`VectorDataset`, `Layer`, lists of layers, GeoJSON). Conversion warnings are issued as
+`UserWarning`s. See [Vector datasets](cli.md#vector-datasets) for the options, GDAL's rules
+and the differences. Filesystem `partition` is unavailable in Pyodide;
+the remaining imported APIs remain available.
+
+#### Renaming and updating vector datasets
+
+`rename_layer`, `edit_vector` and `update_vector` accept the same vector sources as
+`concat`. They return a new `VectorDataset` for memory inputs. For local files,
+`rename_layer(path, in_place=True, ...)` and `edit_vector(path, in_place=True, ...)`
+change a GeoPackage; `update_vector(source, destination_path, ...)` updates an
+existing destination. Read-only files and active SQLite journals are refused.
+
+```python
+renamed = terrio.rename_layer(countries, ascii=True, lower_case=True)
+assigned = terrio.edit_vector(renamed, crs="EPSG:4326")
+updated = terrio.update_vector(changes, renamed, key=["name"], mode="merge")
+terrio.edit_vector("countries.gpkg", in_place=True, metadata=["SOURCE=survey"])
+```
+
+Rename options mirror the CLI: `input_layer`, `output_layer`, `ascii`, `lower_case`,
+`filename_compatible`, `reserved_characters`, `replacement_character`, `max_length`.
+Edit supports `active_layer`, `crs` (`"none"` removes it), `geometry_type`,
+`unset_fid`, dataset/layer `metadata` and `unset_metadata` lists. Metadata edits
+require file paths because the memory model does not retain dataset metadata.
+Assigning a CRS changes its declaration without transforming coordinates.
+Update supports `input_layer`, `output_layer`, `key` and `mode` (`merge`,
+`update-only`, `append-only`); missing layer selections in multilayer datasets fail.
+File edits materialize the dataset and require space for a neighboring temporary
+copy. See the CLI documentation for atomicity and metadata preservation limits.
+
+The vector dataset copy operations `concat`, `rename_layer` and `edit_vector` refuse an
+existing destination path. Choose a new output path; use `in_place=True` for supported
+GeoPackage edits.
+
+### Pixel-wise operations
+
+```python
+physical = terrio.unscale("packed.tif", ot="Float64")          # value * scale + offset
+rgba = terrio.nodata_to_alpha("landsat.tif", "rgba.tif")       # nodata to an alpha band
+groups = terrio.reclassify("nlcd.tif", "11=1;[21,25)=2;DEFAULT=0", ot="Byte")
+groups = terrio.reclassify("nlcd.tif", "@mapping.txt")         # one entry per line
+pixels = terrio.as_features("dem.tif", "pixels.gpkg", geometry_type="polygon", include_xy=True)
+```
+
+These follow GDAL's `gdal raster unscale`, `nodata-to-alpha`, `reclassify` and `as-features`;
+see [unscale](cli.md#unscale), [nodata-to-alpha](cli.md#nodata-to-alpha),
+[reclassify](cli.md#reclassify) and [as-features](cli.md#as-features).
 
 ## Typing
 
@@ -253,6 +382,24 @@ summary = terrio.sql("countries.gpkg", "SELECT COUNT(*) AS n, SUM(POP_EST) AS po
 
 Raw GeoJSON inputs use the layer name `layer`; use `Layer.from_geojson(..., name=...)`
 (Python) or `fromGeoJSON(src, name)` (JavaScript) to assign another name.
+
+## Vector geometry operations
+
+`simplify`, `segmentize`, `convex_hull`, `concave_hull`, `swap_xy`, `set_geom_type`, `combine`
+and `sort` run the [vector geometry commands](cli.md#vector-geometry-commands) (GDAL 3.13's
+`gdal vector` commands of those names) and return a `Layer`. Inputs may be a vector path,
+`VectorDataset`, `Layer`, list of layers, or GeoJSON, with a single layer, or the one `layer=`
+names. `convert(..., simplify=TOLERANCE)` and `convert(..., segmentize=MAX_LENGTH)` are
+`ogr2ogr`'s `-simplify` and `-segmentize`.
+
+```python
+groups = terrio.combine("places.gpkg", group_by=["adm0_a3"])
+hulls = terrio.concave_hull(groups, 0.3, allow_holes=True)
+simple = terrio.simplify("counties.gpkg", 0.01)
+dense = terrio.segmentize(simple, 0.1)
+multi = terrio.set_geom_type("roads.gpkg", multi=True, dim="XYZ")
+ordered = terrio.sort(multi, method="strtree")
+```
 
 ## Geolocation-array warping
 

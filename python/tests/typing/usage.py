@@ -103,7 +103,13 @@ def rasters(tmp: Path) -> terrio.Raster:
     drivers: list[dict[str, Any]] = terrio.drivers()
     print(info["driver"], len(drivers))
     xs, ys = terrio.transform_points(
-        [500000.0], [4100000.0], "EPSG:32610", "EPSG:4326", allow_ballpark=False, only_best=True
+        [500000.0],
+        [4100000.0],
+        "EPSG:32610",
+        "EPSG:4326",
+        allow_ballpark=False,
+        only_best=True,
+        promote_to_3d=False,
     )
     lon: float = float(xs[0])
     lat: float = float(ys[0])

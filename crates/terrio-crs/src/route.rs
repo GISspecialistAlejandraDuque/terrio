@@ -13,6 +13,73 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
+/// An operation used for a point, as [`crate::Transformer::operation_at`] reports it.
+#[derive(Debug, Clone)]
+pub(crate) struct Used {
+    pub name: String,
+    pub accuracy: f64,
+    pub grids: Vec<String>,
+    pub ballpark: bool,
+}
+
+thread_local! {
+    /// The operations used on this thread while [`recording`] runs.
+    static USED: std::cell::RefCell<Option<Vec<Used>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f`, returning its result and the operations routes and geoid models used meanwhile.
+pub(crate) fn recording<T>(f: impl FnOnce() -> T) -> (T, Vec<Used>) {
+    struct Restore(Option<Vec<Used>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            USED.with(|used| *used.borrow_mut() = self.0.take());
+        }
+    }
+    // The previous capture is restored on return and on a caught unwind.
+    let _restore = Restore(USED.with(|used| used.replace(Some(Vec::new()))));
+    let out = f();
+    let used = USED.with(|used| used.take()).unwrap_or_default();
+    (out, used)
+}
+
+/// Whether an operation changes the datum or heights, for its name when it has none.
+#[derive(Clone, Copy)]
+pub(crate) enum OpKind {
+    Datum,
+    Vertical,
+}
+
+/// Records that an operation was used, run in reverse or not: `None` (or one without steps) for
+/// PROJ's ballpark.
+pub(crate) fn note(op: Option<&Op>, reverse: bool, kind: OpKind) {
+    USED.with(|u| {
+        let mut u = u.borrow_mut();
+        let Some(used) = u.as_mut() else { return };
+        used.push(match op {
+            Some(op) if !op.ballpark && !op.steps.is_empty() => {
+                let names = step_names(op, reverse);
+                let name = if names.is_empty() {
+                    let unnamed = match kind {
+                        OpKind::Datum => "transformation to WGS 84",
+                        OpKind::Vertical => "geoid model",
+                    };
+                    if reverse { format!("Inverse of {unnamed}") } else { format!("{}{}", unnamed[..1].to_uppercase(), &unnamed[1..]) }
+                } else {
+                    names.join(" + ")
+                };
+                Used { name, accuracy: op.accuracy, grids: op.grids().into_iter().map(|(g, _)| g).collect(), ballpark: false }
+            }
+            _ => {
+                let name = match kind {
+                    OpKind::Datum => "Ballpark geographic offset",
+                    OpKind::Vertical => "Ballpark vertical transformation",
+                };
+                Used { name: name.into(), accuracy: -1.0, grids: Vec::new(), ballpark: true }
+            }
+        });
+    });
+}
+
 /// A transformation and the direction it runs in.
 #[derive(Debug, Clone)]
 pub(crate) struct Leg {
@@ -308,15 +375,17 @@ impl Route {
         match &self.kind {
             Kind::List(list) => {
                 let leg = list.iter().find(|l| std::ptr::eq(l.op.as_ref(), op))?;
-                datum::run_op(op, p, leg.reverse, three_d)
+                datum::run_op(op, p, leg.reverse, three_d).inspect(|_| note(Some(op), leg.reverse, OpKind::Datum))
             }
             Kind::Chains { chains, .. } => {
                 if op.ballpark {
+                    note(None, false, OpKind::Datum);
                     return Some(p);
                 }
                 let c = chains.iter().find(|c| std::ptr::eq(&c.rank, op))?;
                 let [a, b] = &c.legs;
                 let q = datum::run(&a.op.steps, p, a.reverse, true).and_then(|q| datum::run(&b.op.steps, q, b.reverse, true))?;
+                note(Some(&c.rank), false, OpKind::Datum);
                 Some(if three_d || !c.rank.keeps_height { q } else { Point { h: p.h, ..q } })
             }
             _ => self.apply(src, x, y, p, three_d),
@@ -382,7 +451,12 @@ impl Route {
         three_d: bool,
         record: &impl Fn(Option<&Op>, bool),
     ) -> Option<Point> {
-        let report = |result: Option<Point>, op: Option<&Op>, outside: bool| result.inspect(|_| record(op, outside));
+        let report = |result: Option<Point>, op: Option<&Op>, reverse: bool, outside: bool| {
+            result.inspect(|_| {
+                note(op, reverse, OpKind::Datum);
+                record(op, outside)
+            })
+        };
         // PROJ compares the source coordinates with the areas: for a geographic source, its
         // longitude and latitude as given, in degrees.
         let (dlon, dlat) = src.source_degrees(x, y).unwrap_or((p.lon.to_degrees(), p.lat.to_degrees()));
@@ -396,7 +470,7 @@ impl Route {
             Kind::Same => Some(p),
             // No transformation at all (a CRS of an unknown datum, defined by its ellipsoid alone):
             // no shift, PROJ's ballpark transformation.
-            Kind::List(list) if list.is_empty() => report(Some(p), None, false),
+            Kind::List(list) if list.is_empty() => report(Some(p), None, false, false),
             Kind::List(list) => {
                 let boxes = self.boxes.get_or_init(|| list.iter().map(|l| src.areas(&l.op)).collect());
                 let ops: Vec<&Op> = list.iter().map(|l| l.op.as_ref()).collect();
@@ -407,13 +481,14 @@ impl Route {
                         report(
                             datum::run_op(&list[i].op, p, list[i].reverse, three_d),
                             Some(&list[i].op),
+                            list[i].reverse,
                             !inside(&list[i].op, boxes.get(i)),
                         )
                     },
                 )
             }
             // PROJ's ballpark alone: no shift.
-            Kind::Chains { chains, .. } if chains.is_empty() => report(Some(p), None, false),
+            Kind::Chains { chains, .. } if chains.is_empty() => report(Some(p), None, false, false),
             Kind::Chains { chains, ballpark } => {
                 // Heights go through both transformations, as in PROJ's pipeline for the chain (the
                 // conversion to geodetic coordinates and back between them cancelling out), and
@@ -427,7 +502,7 @@ impl Route {
                 if chains.len() == 1 && ballpark.is_none() {
                     let chain = &chains[0];
                     let boxes = self.boxes.get_or_init(|| chains.iter().map(|c| src.areas(&c.rank)).collect());
-                    return report(run(chain), Some(&chain.rank), !inside(&chain.rank, boxes.first()));
+                    return report(run(chain), Some(&chain.rank), false, !inside(&chain.rank, boxes.first()));
                 }
                 let boxes = self.boxes.get_or_init(|| chains.iter().map(|c| src.areas(&c.rank)).collect());
                 let ranks: Vec<&Op> = chains.iter().map(|c| &c.rank).chain(ballpark.as_ref()).collect();
@@ -436,20 +511,20 @@ impl Route {
                     let Some(i) = datum::pick_index(&ranks, &excluded, |op, i| op.ballpark || inside(op, boxes.get(i))) else { break };
                     // The ballpark (more accurate than the chains between CRSs that differ by
                     // their prime meridians alone): no shift.
-                    let Some(chain) = chains.get(i) else { return report(Some(p), None, false) };
+                    let Some(chain) = chains.get(i) else { return report(Some(p), None, false, false) };
                     if let Some(r) = run(chain) {
-                        return report(Some(r), Some(&chain.rank), !inside(&chain.rank, boxes.get(i)));
+                        return report(Some(r), Some(&chain.rank), false, !inside(&chain.rank, boxes.get(i)));
                     }
                     excluded.push(i);
                 }
                 if ballpark.is_some() {
                     // The ballpark holds every point: no shift.
-                    return report(Some(p), None, false);
+                    return report(Some(p), None, false, false);
                 }
                 // No transformation for the point: the first that needs no grid, as PROJ's
                 // `proj_trans`.
                 let (i, first) = chains.iter().enumerate().find(|(_, c)| !c.rank.needs_grids())?;
-                report(run(first), Some(&first.rank), !inside(&first.rank, boxes.get(i)))
+                report(run(first), Some(&first.rank), false, !inside(&first.rank, boxes.get(i)))
             }
             Kind::Hub => {
                 let (sb, db) = self.hub_boxes.get_or_init(|| {
@@ -465,11 +540,14 @@ impl Route {
                         // Heights go through both, as in PROJ's pipeline (see the chains).
                         let r = datum::run(&s.steps, p, false, true).and_then(|q| datum::run(&d.steps, q, true, true))?;
                         let result = Some(if three_d || !(s.keeps_height && d.keeps_height) { r } else { Point { h: p.h, ..r } });
+                        if result.is_some() {
+                            note(Some(s), false, OpKind::Datum);
+                        }
                         record(Some(s), false);
-                        report(result, Some(d), false)
+                        report(result, Some(d), true, false)
                     }
                     // No transformation (or an unknown datum): no shift, as PROJ's ballpark.
-                    _ => report(Some(p), None, false),
+                    _ => report(Some(p), None, false, false),
                 }
             }
         }
@@ -1062,6 +1140,42 @@ fn step_names(op: &Op, reverse: bool) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::{SpatialRef, Transformer};
+
+    #[test]
+    fn recording_cleans_up_after_unwind() {
+        assert!(
+            std::panic::catch_unwind(|| recording(|| {
+                note(None, false, OpKind::Datum);
+                panic!("recording interrupted");
+            }))
+            .is_err()
+        );
+        USED.with(|used| assert!(used.borrow().is_none()));
+        // An unrecorded operation must stay a no-op after the caught panic.
+        note(None, false, OpKind::Datum);
+        USED.with(|used| assert!(used.borrow().is_none()));
+    }
+
+    #[test]
+    fn nested_recording_restores_the_outer_capture() {
+        let (_, outer) = recording(|| {
+            note(None, false, OpKind::Datum);
+            let (_, inner) = recording(|| note(None, false, OpKind::Vertical));
+            assert_eq!(inner.len(), 1);
+            assert_eq!(inner[0].name, "Ballpark vertical transformation");
+            assert!(
+                std::panic::catch_unwind(|| recording(|| {
+                    note(None, false, OpKind::Vertical);
+                    panic!("inner recording interrupted");
+                }))
+                .is_err()
+            );
+            note(None, false, OpKind::Datum);
+        });
+        assert_eq!(outer.len(), 2);
+        assert!(outer.iter().all(|operation| operation.name == "Ballpark geographic offset"));
+        USED.with(|used| assert!(used.borrow().is_none()));
+    }
 
     #[test]
     fn reports_the_successful_fallback_after_a_grid_pipeline_fails() {

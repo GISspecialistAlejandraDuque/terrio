@@ -1,5 +1,6 @@
 //! The processing operations, as the command line and Python offer them: `warp`, `translate`,
-//! `rasterize`, `polygonize`, `dem`, `calc`, `mosaic`, `proximity` and `sieve`.
+//! `rasterize`, `polygonize`, `dem`, `calc`, `mosaic`, `proximity`, `sieve`, `neighbors`,
+//! `nearblack`, `cleanCollar` and `enhance`.
 //!
 //! Inputs are `Dataset`s, or the bytes of a file (a `Uint8Array`, or `{ bytes, filename }` when
 //! the format cannot be told from the bytes); vector inputs may also be GeoJSON (an object or a
@@ -25,12 +26,12 @@ use terrio::ops::warp::{Cutline, Nodata, WarpOptions};
 use terrio::{Layer, RasterDataset};
 use wasm_bindgen::prelude::*;
 
-fn invalid(msg: impl std::fmt::Display) -> JsError {
+pub(crate) fn invalid(msg: impl std::fmt::Display) -> JsError {
     JsError::new(&msg.to_string())
 }
 
 /// The bytes of a file given as a `Uint8Array` or `{ bytes, filename }`, with its file name.
-fn file_bytes(v: &JsValue) -> Option<(Vec<u8>, String)> {
+pub(crate) fn file_bytes(v: &JsValue) -> Option<(Vec<u8>, String)> {
     if let Some(a) = v.dyn_ref::<js_sys::Uint8Array>() {
         return Some((a.to_vec(), "data".into()));
     }
@@ -94,7 +95,7 @@ pub(crate) fn input_layers(v: &JsValue) -> Result<Vec<Layer>, JsError> {
 
 /// Takes the options that are JavaScript values (datasets) out of an options object, returning
 /// them and a copy of the object without them, for the others to be parsed.
-fn split_options(options: &JsValue, keys: &[&str]) -> Result<(JsValue, Vec<Option<JsValue>>), JsError> {
+pub(crate) fn split_options(options: &JsValue, keys: &[&str]) -> Result<(JsValue, Vec<Option<JsValue>>), JsError> {
     if options.is_undefined() || options.is_null() {
         return Ok((JsValue::UNDEFINED, vec![None; keys.len()]));
     }
@@ -1183,4 +1184,333 @@ pub fn pansharpen_vrt(pan: &str, spectral: Vec<String>, sources: JsValue, option
         .flat_map(|(name, header)| (1..=header.raster.bands).map(move |band| (name.as_str(), header, band)))
         .collect::<Vec<_>>();
     Ok(terrio::ops::pansharpen::vrt::PansharpenVrt::from_rasters(pan, &pan_header, &inputs, &o).map_err(js_err)?.to_xml())
+}
+
+/// Applies a per-feature geometry operation to every layer of vector input.
+fn vector_geom_op(src: &JsValue, op: terrio::ops::vector_geom::GeometryOp) -> Result<Dataset, JsError> {
+    let layers = input_layers(src)?;
+    let out = layers.iter().map(|l| terrio::ops::vector_geom::apply(l, &op)).collect::<terrio::Result<Vec<_>>>().map_err(js_err)?;
+    Ok(Dataset::from_layers(out, VectorDriver::GeoJSON))
+}
+
+/// Topology-preserving simplification of every geometry (GEOS's TopologyPreservingSimplifier,
+/// as `gdal vector simplify`), with a tolerance in CRS units. Z is kept, M dropped.
+#[wasm_bindgen]
+pub fn simplify(src: JsValue, tolerance: f64) -> Result<Dataset, JsError> {
+    vector_geom_op(&src, terrio::ops::vector_geom::GeometryOp::Simplify { tolerance })
+}
+
+/// Adds vertices so that no segment is longer than `maxLength` (CRS units), as `gdal vector
+/// segmentize`.
+#[wasm_bindgen]
+pub fn segmentize(src: JsValue, max_length: f64) -> Result<Dataset, JsError> {
+    vector_geom_op(&src, terrio::ops::vector_geom::GeometryOp::Segmentize { max_length })
+}
+
+/// The convex hull of every geometry, as `gdal vector convex-hull`.
+#[wasm_bindgen(js_name = convexHull)]
+pub fn convex_hull(src: JsValue) -> Result<Dataset, JsError> {
+    vector_geom_op(&src, terrio::ops::vector_geom::GeometryOp::ConvexHull)
+}
+
+/// Options of [`concave_hull`].
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+struct ConcaveHullArgs {
+    allow_holes: bool,
+    tight: bool,
+}
+
+/// The concave hull of every geometry (of its polygons for polygonal input), as `gdal vector
+/// concave-hull`. `ratio` goes from 0 (most concave) to 1 (convex hull). Options: `allowHoles`,
+/// `tight`.
+#[wasm_bindgen(js_name = concaveHull)]
+pub fn concave_hull(src: JsValue, ratio: f64, options: JsValue) -> Result<Dataset, JsError> {
+    let a: ConcaveHullArgs = parse_options(&options)?;
+    let o = terrio::ops::vector_geom::ConcaveHullOptions { ratio, allow_holes: a.allow_holes, tight: a.tight };
+    vector_geom_op(&src, terrio::ops::vector_geom::GeometryOp::ConcaveHull(o))
+}
+
+/// Swaps the X and Y coordinates of every geometry, as `gdal vector swap-xy`.
+#[wasm_bindgen(js_name = swapXy)]
+pub fn swap_xy(src: JsValue) -> Result<Dataset, JsError> {
+    vector_geom_op(&src, terrio::ops::vector_geom::GeometryOp::SwapXy)
+}
+
+/// Options of [`set_geom_type`].
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+struct SetGeomTypeArgs {
+    geometry_type: Option<String>,
+    multi: bool,
+    single: bool,
+    linear: bool,
+    dim: Option<String>,
+    layer_only: bool,
+    feature_only: bool,
+    skip: bool,
+}
+
+/// Changes geometry types and dimensions, as `gdal vector set-geom-type`. Options:
+/// `geometryType` (`"MULTIPOLYGON"`, `"POINTZ"`...), `multi`, `single`, `linear`, `dim`
+/// (`"XY"`, `"XYZ"`, `"XYM"`, `"XYZM"`), `layerOnly`, `featureOnly`, `skip`.
+#[wasm_bindgen(js_name = setGeomType)]
+pub fn set_geom_type(src: JsValue, options: JsValue) -> Result<Dataset, JsError> {
+    use terrio::ops::vector_geom::{Dimension, GeometryOp, GeometryTypeSpec, SetGeomTypeOptions};
+    let a: SetGeomTypeArgs = parse_options(&options)?;
+    let o = SetGeomTypeOptions {
+        geometry_type: a.geometry_type.as_deref().map(GeometryTypeSpec::parse).transpose().map_err(js_err)?,
+        multi: a.multi,
+        single: a.single,
+        linear: a.linear,
+        curve: false,
+        dim: a.dim.as_deref().map(Dimension::parse).transpose().map_err(js_err)?,
+        layer_only: a.layer_only,
+        feature_only: a.feature_only,
+        skip: a.skip,
+    };
+    vector_geom_op(&src, GeometryOp::SetGeomType(o))
+}
+
+/// Options of [`combine`].
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+struct CombineArgs {
+    group_by: Vec<String>,
+    keep_nested: bool,
+    add_extra_fields: String,
+}
+
+impl Default for CombineArgs {
+    fn default() -> Self {
+        Self { group_by: Vec::new(), keep_nested: false, add_extra_fields: "no".into() }
+    }
+}
+
+/// Combines geometries into collections, one feature per group of field values, as `gdal
+/// vector combine`. Options: `groupBy` (field names), `keepNested`, `addExtraFields` (`"no"`,
+/// `"sometimes-identical"`, `"always-identical"`).
+#[wasm_bindgen]
+pub fn combine(src: JsValue, options: JsValue) -> Result<Dataset, JsError> {
+    use terrio::ops::vector_geom::{CombineOptions, ExtraFields};
+    let a: CombineArgs = parse_options(&options)?;
+    let o = CombineOptions {
+        group_by: a.group_by,
+        keep_nested: a.keep_nested,
+        add_extra_fields: ExtraFields::parse(&a.add_extra_fields).map_err(js_err)?,
+    };
+    let layers = input_layers(&src)?;
+    let out = layers.iter().map(|l| terrio::ops::vector_geom::combine(l, &o)).collect::<terrio::Result<Vec<_>>>().map_err(js_err)?;
+    Ok(Dataset::from_layers(out, VectorDriver::GeoJSON))
+}
+
+/// Options of [`sort`].
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+struct SortArgs {
+    method: String,
+}
+
+impl Default for SortArgs {
+    fn default() -> Self {
+        Self { method: "hilbert".into() }
+    }
+}
+
+/// Sorts features spatially, as `gdal vector sort`. Options: `method` (`"hilbert"`, the
+/// default, or `"strtree"`). Null and empty geometries go last.
+#[wasm_bindgen]
+pub fn sort(src: JsValue, options: JsValue) -> Result<Dataset, JsError> {
+    let a: SortArgs = parse_options(&options)?;
+    let method = terrio::ops::vector_geom::SortMethod::parse(&a.method).map_err(js_err)?;
+    let layers = input_layers(&src)?;
+    let out = layers.iter().map(|l| terrio::ops::vector_geom::sort(l, method)).collect();
+    Ok(Dataset::from_layers(out, VectorDriver::GeoJSON))
+}
+
+/// Options of [`neighbors`].
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+struct NeighborsArgs {
+    band: Option<usize>,
+    kernel: OneOrMany,
+    method: OneOrMany,
+    size: Option<usize>,
+    ot: Option<String>,
+}
+
+/// A string or an array of strings.
+#[derive(Deserialize, Default)]
+#[serde(untagged)]
+enum OneOrMany {
+    #[default]
+    None,
+    One(String),
+    Many(Vec<String>),
+}
+
+impl OneOrMany {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::None => Vec::new(),
+            Self::One(s) => vec![s],
+            Self::Many(v) => v,
+        }
+    }
+}
+
+/// Focal statistics and convolution kernels, as `terrio neighbors` (GDAL's
+/// `gdal raster neighbors`).
+///
+/// Options: `kernel` (required: `"u"`, `"v"`, `"edge1"`, `"edge2"`, `"sharpen"`, `"gaussian"`,
+/// `"unsharp-masking"`, `"equal"` or a matrix `"[[0,1,0],[1,1,1],[0,1,0]]"`, or an array of
+/// them), `method` (`"sum"`, `"mean"`, `"min"`, `"max"`, `"stddev"`, `"median"`, `"mode"`, or
+/// one per kernel), `size`, `band` (every band by default), `ot` (`"Float64"`) and `nodata` (a
+/// number or `"none"`; the input band's by default).
+#[wasm_bindgen]
+pub fn neighbors(src: JsValue, options: JsValue) -> Result<Dataset, JsError> {
+    use terrio::ops::neighbors::{NeighborMethod, NeighborsNodata, NeighborsOptions};
+    let (rest, taken) = split_options(&options, &["nodata"])?;
+    let a: NeighborsArgs = parse_options(&rest)?;
+    let nodata = match &taken[0] {
+        None => NeighborsNodata::Source,
+        Some(v) => match (v.as_string(), v.as_f64()) {
+            (Some(s), _) => NeighborsNodata::parse(&s).map_err(js_err)?,
+            (_, Some(x)) => NeighborsNodata::Value(x),
+            _ => return Err(invalid("nodata is a number or 'none'")),
+        },
+    };
+    let o = NeighborsOptions {
+        band: a.band,
+        kernels: a.kernel.into_vec(),
+        methods: a.method.into_vec().iter().map(|m| NeighborMethod::parse(m)).collect::<terrio::Result<_>>().map_err(js_err)?,
+        size: a.size,
+        output_type: parse_data_type(a.ot.as_deref().unwrap_or("Float64")).map_err(js_err)?,
+        nodata,
+    };
+    let ds = input_raster(&src)?;
+    Ok(Dataset::from_raster(terrio::ops::neighbors::neighbors(&ds, &o).map_err(js_err)?))
+}
+
+/// Options of [`nearblack`] and [`clean_collar`].
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+struct CollarArgs {
+    colors: OneOrMany,
+    white: bool,
+    color_threshold: i32,
+    pixel_distance: i32,
+    add_alpha: bool,
+    add_mask: bool,
+    algorithm: Option<String>,
+}
+
+impl Default for CollarArgs {
+    fn default() -> Self {
+        Self {
+            colors: OneOrMany::None,
+            white: false,
+            color_threshold: 15,
+            pixel_distance: 2,
+            add_alpha: false,
+            add_mask: false,
+            algorithm: None,
+        }
+    }
+}
+
+fn collar(src: JsValue, options: JsValue, clean_collar: bool) -> Result<Dataset, JsError> {
+    use terrio::ops::nearblack::CollarRequest;
+    let a: CollarArgs = parse_options(&options)?;
+    if a.add_mask {
+        return Err(invalid("addMask is not supported in JavaScript, whose Datasets hold no mask: use addAlpha"));
+    }
+    let ds = input_raster(&src)?;
+    let o = CollarRequest {
+        colors: a.colors.into_vec(),
+        white: a.white,
+        near: a.color_threshold,
+        max_non_black: a.pixel_distance,
+        set_alpha: a.add_alpha,
+        set_mask: false,
+        algorithm: a.algorithm,
+        clean_collar,
+    }
+    .resolve(&ds, false)
+    .map_err(js_err)?;
+    Ok(Dataset::from_raster(terrio::ops::nearblack::nearblack(&ds, &o).map_err(js_err)?.dataset))
+}
+
+/// Sets the nearly black (or white) borders of an image to exact black (or white), as
+/// `terrio nearblack` (GDAL's `nearblack`, two scan passes by default).
+///
+/// Options: `colors` (`"black"`, `"white"` or `"r,g,b"` strings), `white`, `colorThreshold`
+/// (15), `pixelDistance` (2), `addAlpha` and `algorithm` (`"twopasses"` or `"floodfill"`).
+/// Masks (`addMask`) are not supported: Datasets hold none.
+#[wasm_bindgen]
+pub fn nearblack(src: JsValue, options: JsValue) -> Result<Dataset, JsError> {
+    collar(src, options, false)
+}
+
+/// Cleans the noisy collar of an image, as `terrio clean-collar` (GDAL's
+/// `gdal raster clean-collar`): a flood fill from the edges by default, an input's last alpha
+/// band kept updated. Options as [`nearblack`]'s.
+#[wasm_bindgen(js_name = cleanCollar)]
+pub fn clean_collar(src: JsValue, options: JsValue) -> Result<Dataset, JsError> {
+    collar(src, options, true)
+}
+
+/// Options of [`enhance`] and [`enhance_luts`].
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+struct EnhanceArgs {
+    equalize: bool,
+    config: Option<String>,
+    src_scale: Option<[f64; 2]>,
+    lut_bins: usize,
+    ot: String,
+}
+
+impl Default for EnhanceArgs {
+    fn default() -> Self {
+        Self { equalize: false, config: None, src_scale: None, lut_bins: 256, ot: "Byte".into() }
+    }
+}
+
+fn enhance_tables(ds: &RasterDataset, a: &EnhanceArgs) -> Result<Vec<terrio::ops::enhance::BandLut>, JsError> {
+    use terrio::ops::enhance as e;
+    match (a.equalize, &a.config, a.src_scale) {
+        (true, None, None) => e::equalization_luts(ds, a.lut_bins).map_err(js_err),
+        (false, Some(text), None) => e::parse_luts(text, ds.band_count(), a.lut_bins).map_err(js_err),
+        (false, None, Some([lo, hi])) => e::linear_luts(ds.band_count(), lo, hi).map_err(js_err),
+        _ => Err(invalid("give one of equalize, config (the LUT file's text) or srcScale")),
+    }
+}
+
+/// Enhances the contrast of a raster with lookup tables, as `terrio enhance` (GDAL's
+/// `gdalenhance`).
+///
+/// Options: `equalize` (histogram equalization), `config` (the text of a LUT file, as
+/// `enhanceLuts` returns it), or `srcScale` (`[min, max]` stretched over the bins); `lutBins`
+/// (256) and `ot` (`"Byte"`).
+#[wasm_bindgen]
+pub fn enhance(src: JsValue, options: JsValue) -> Result<Dataset, JsError> {
+    let a: EnhanceArgs = parse_options(&options)?;
+    let ds = input_raster(&src)?;
+    let tables = enhance_tables(&ds, &a)?;
+    let o = terrio::ops::enhance::EnhanceOptions { bins: a.lut_bins, output_type: parse_data_type(&a.ot).map_err(js_err)? };
+    Ok(Dataset::from_raster(terrio::ops::enhance::enhance(&ds, &tables, &o).map_err(js_err)?))
+}
+
+/// The histogram-equalization tables of a raster, as the text of a `gdalenhance -config` file.
+/// Options: `lutBins` (256).
+#[wasm_bindgen(js_name = enhanceLuts)]
+pub fn enhance_luts(src: JsValue, options: JsValue) -> Result<String, JsError> {
+    let mut a: EnhanceArgs = parse_options(&options)?;
+    if a.config.is_some() {
+        return Err(invalid("enhanceLuts only computes equalization tables; config is not accepted"));
+    }
+    a.equalize = true;
+    let ds = input_raster(&src)?;
+    Ok(terrio::ops::enhance::format_luts(&enhance_tables(&ds, &a)?))
 }

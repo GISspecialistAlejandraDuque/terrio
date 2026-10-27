@@ -192,3 +192,73 @@ fn strict_hub_routes_reject_point_fallbacks_without_poisoning_later_points() {
     assert!(t.transform(-2.0, 52.0).is_ok());
     assert!(t.check_policy().is_ok());
 }
+
+#[test]
+fn missing_geoid_models_can_be_refused() {
+    // As GDAL 3.13.3 / PROJ 9.9 without grids: heights are kept (PROJ's ballpark vertical
+    // transformation), unless ONLY_BEST=YES (the EGM96 or NLGEO2018 grid is missing) or
+    // ALLOW_BALLPARK=NO refuses it.
+    terrio::crs::set_grid_search_paths(Some(vec![]));
+    terrio::crs::set_network_enabled(Some(false));
+    let cases = [
+        ("EPSG:4326+5773", "EPSG:4979", (153.0, -27.0, 0.0)),
+        ("EPSG:4979", "EPSG:4326+5773", (153.0, -27.0, 0.0)),
+        ("EPSG:4979", "EPSG:7415", (5.0, 52.0, 0.0)),
+        ("EPSG:4326+5773", "EPSG:4326+3855", (153.0, -27.0, 0.0)),
+    ];
+    for (src, dst, (x, y, z)) in cases {
+        let (src, dst) = (SpatialRef::parse(src).unwrap(), SpatialRef::parse(dst).unwrap());
+        let (_, _, h) = Transformer::new(&src, &dst).unwrap().transform_3d(x, y, z).unwrap();
+        assert_eq!(h, 0.0);
+        for (opts, refusal) in [
+            (TransformOptions { only_best: true, ..Default::default() }, "ONLY_BEST"),
+            (TransformOptions { allow_ballpark: Some(false), ..Default::default() }, "ALLOW_BALLPARK"),
+        ] {
+            let result = Transformer::with_options(&src, &dst, &opts).and_then(|t| t.transform_3d(x, y, z));
+            let error = result.expect_err(&format!("{refusal}: {:?} -> {:?}", src.name(), dst.name())).to_string();
+            assert!(error.contains(refusal), "{src:?} -> {dst:?}: {error}");
+        }
+    }
+    // A vertical CRS kept as it is, or without a height on either side, is no vertical operation.
+    let opts = TransformOptions { only_best: true, allow_ballpark: Some(false), ..Default::default() };
+    let same = SpatialRef::parse("EPSG:4326+5773").unwrap();
+    assert!(Transformer::with_options(&same, &same, &opts).unwrap().transform_3d(153.0, -27.0, 5.0).is_ok());
+    let flat = (SpatialRef::parse("EPSG:4326").unwrap(), SpatialRef::parse("EPSG:3857").unwrap());
+    assert!(Transformer::with_options(&flat.0, &flat.1, &opts).unwrap().transform_3d(10.0, 45.0, 5.0).is_ok());
+}
+
+#[test]
+fn promoted_vector_heights_match_gdal_and_keep_geometry_dimensions() {
+    // GDAL 3.12.2 / PROJ 9.8.1, OGR Geometry.Transform with a promoted RD New CRS.
+    let json = br#"{"type":"FeatureCollection","features":[
+        {"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[85000,447000,0]}},
+        {"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[85000,447000,100]}},
+        {"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[85000,447000]}}
+    ]}"#;
+    let mut layer = terrio::memory::parse_geojson_layer(json, "points").unwrap();
+    SpatialRef::from_epsg(28992).unwrap().apply_to_layer(&mut layer);
+    let target = SpatialRef::from_epsg(4979).unwrap();
+    for promote in [false, true] {
+        let options = TransformOptions { promote_to_3d: promote, ..Default::default() };
+        let output = terrio::vector::reproject_layer_with_options(layer.clone(), &target, &options).unwrap();
+        let expected = [
+            (4.367683424792349, 52.006949098822965, Some(if promote { 43.57639261614531 } else { 0.0 })),
+            (
+                if promote { 4.36768342318245 } else { 4.367683424792349 },
+                if promote { 52.0069491123924 } else { 52.006949098822965 },
+                Some(if promote { 143.576799856499 } else { 100.0 }),
+            ),
+            (4.367683424792349, 52.006949098822965, None),
+        ];
+        assert_eq!(output.features.len(), expected.len());
+        for (feature, (x, y, z)) in output.features.iter().zip(expected) {
+            let Some(terrio::Geometry::Point(point)) = &feature.geometry else { panic!("expected a point") };
+            assert!((point.x - x).abs() < 1e-8 && (point.y - y).abs() < 1e-8);
+            match (point.z, z) {
+                (Some(got), Some(want)) => assert!((got - want).abs() < 0.001, "promote={promote}: {got} vs {want}"),
+                (None, None) => {}
+                other => panic!("geometry dimensions changed: {other:?}"),
+            }
+        }
+    }
+}

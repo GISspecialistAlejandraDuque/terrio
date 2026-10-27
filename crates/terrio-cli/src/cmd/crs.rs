@@ -25,7 +25,7 @@ pub struct Args {
     /// `gdaltransform -t_coord_epoch`.
     #[arg(long = "t_coord_epoch", visible_alias = "t-coord-epoch", value_name = "YEAR")]
     t_coord_epoch: Option<f64>,
-    /// Coordinate operation options: ALLOW_BALLPARK=YES|NO, ONLY_BEST=YES|NO.
+    /// Coordinate operation options: ALLOW_BALLPARK=YES|NO, ONLY_BEST=YES|NO, PROMOTE_TO_3D=YES|NO.
     #[arg(long = "ct-opt", visible_aliases = ["to-option", "ct_opt"], value_name = "KEY=VALUE")]
     transform_options: Vec<String>,
     /// Number of ordinates per positional point (2: XY, 3: XYZ, 4: XYZ and epoch).

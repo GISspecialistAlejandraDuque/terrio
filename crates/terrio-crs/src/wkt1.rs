@@ -266,7 +266,12 @@ pub(crate) fn to_proj(root: &Node) -> Option<Converted> {
                     push(&mut out, "lat_2", Some(s2));
                 }
                 // ESRI's single-parallel form.
-                (Some(s1), None) => push(&mut out, "lat_1", Some(s1)),
+                (Some(s1), None) if method == "lambertconformalconic" => push(&mut out, "lat_1", Some(s1)),
+                // A 2SP method without its second parallel: 0, as GDAL reads it.
+                (Some(s1), None) => {
+                    push(&mut out, "lat_1", Some(s1));
+                    push(&mut out, "lat_2", Some(0.0));
+                }
                 _ => push(&mut out, "lat_1", lat_0),
             }
             push(&mut out, "lat_0", lat_0);
@@ -333,6 +338,16 @@ pub(crate) fn to_proj(root: &Node) -> Option<Converted> {
             out.push("+proj=laea".into());
             push(&mut out, "lat_0", lat_0);
             push(&mut out, "lon_0", lon_0);
+        }
+        // PROJ's two-point form, with GDAL's and ESRI's parameter names.
+        "hotineobliquemercatortwopointnaturalorigin" => {
+            out.push("+proj=omerc".into());
+            push(&mut out, "lat_0", lat_0);
+            push(&mut out, "lat_1", angle(&["latitudeofpoint1", "latitudeof1stpoint"]));
+            push(&mut out, "lon_1", angle(&["longitudeofpoint1", "longitudeof1stpoint"]));
+            push(&mut out, "lat_2", angle(&["latitudeofpoint2", "latitudeof2ndpoint"]));
+            push(&mut out, "lon_2", angle(&["longitudeofpoint2", "longitudeof2ndpoint"]));
+            push(&mut out, "k", k.or(Some(1.0)));
         }
         "hotineobliquemercator" | "hotineobliquemercatorazimuthnaturalorigin" | "hotineobliquemercatorvarianta" => {
             out.push("+proj=omerc +no_uoff".into());

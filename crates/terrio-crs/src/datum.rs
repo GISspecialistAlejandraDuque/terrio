@@ -232,6 +232,7 @@ pub(crate) fn parse_steps(s: &str) -> Option<Vec<Step>> {
         };
         let (name, rest) = body.split_once(' ').unwrap_or((body, ""));
         let p = Params::parse(rest);
+        p.validate_quoting().ok()?;
         let epochs = || (p.f64("t_epoch").unwrap_or(0.0), p.f64("t_final").unwrap_or(0.0));
         let step = match name {
             "cart" => Step::Cart { ell: ellipsoid(&p)?, inv },

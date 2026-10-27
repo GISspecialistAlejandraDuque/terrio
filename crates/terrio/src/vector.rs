@@ -153,11 +153,16 @@ pub fn reproject_layer_with_options(
         for (j, f) in features.iter_mut().enumerate() {
             if let Some(g) = f.geometry.as_mut()
                 && let Err(e) = map_coords(g, &mut |c| {
-                    if cartesian {
+                    if cartesian || options.promote_to_3d {
+                        let keep_z = cartesian || c.z.is_some();
                         let (x, y, z) = t.transform_3d(c.x, c.y, c.z.unwrap_or(0.0))?;
                         c.x = x;
                         c.y = y;
-                        c.z = Some(z);
+                        // Promotion changes CRS height semantics. OGR still keeps
+                        // 2D geometries 2D; geocentric coordinates require a Z.
+                        if keep_z {
+                            c.z = Some(z);
+                        }
                     } else {
                         let (x, y) = t.transform(c.x, c.y)?;
                         c.x = x;

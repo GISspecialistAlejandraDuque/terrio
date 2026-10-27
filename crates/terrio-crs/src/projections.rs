@@ -59,6 +59,12 @@ pub(crate) fn build(name: &str, s: &mut Setup<'_>) -> Result<Option<Box<dyn Proj
         }
         "lcc" => Box::new(Lcc::new(s)?),
         "merc" => Box::new(Merc::new(s)?),
+        // Web Mercator: the spherical formulas on the semi-major axis, with geodetic latitudes
+        // and a scale of 1 whatever `k_0`, as PROJ's `webmerc`.
+        "webmerc" => {
+            s.k0 = 1.0;
+            Box::new(Merc { e: 0.0, k0: 1.0 })
+        }
         "aea" => Box::new(Aea::new(s)?),
         "eqdc" => Box::new(Eqdc::new(s)?),
         "laea" => Box::new(Laea::new(s)),
@@ -257,14 +263,13 @@ struct Lcc {
 impl Lcc {
     fn new(s: &mut Setup<'_>) -> Result<Self> {
         let phi1 = s.p.angle("lat_1").unwrap_or(0.0);
+        // Without `lat_2`: one standard parallel with `lat_0` (Lambert Conic Conformal (1SP), or
+        // its variant B), else a second parallel on the equator, as PROJ reads such a CRS (2SP,
+        // the parameters left out at 0). PROJ's `lcc` operation would put both on `lat_1`.
         let phi2 = match s.p.angle("lat_2") {
             Some(v) => v,
-            None => {
-                if s.p.angle("lat_0").is_none() {
-                    s.phi0 = phi1;
-                }
-                phi1
-            }
+            None if s.p.angle("lat_0").is_some() => phi1,
+            None => 0.0,
         };
         if (phi1 + phi2).abs() < 1e-10 {
             return Err(err("lcc: lat_1 = -lat_2"));
@@ -822,6 +827,14 @@ fn ssfn(phit: f64, sinphi: f64, e: f64) -> f64 {
 
 impl Stere {
     fn new(s: &mut Setup<'_>) -> Self {
+        // At a pole, `lat_ts` gives the hemisphere, as PROJ reads such a CRS (Polar Stereographic
+        // (variant B), whose standard parallel's sign is the pole's); a bare `stere` operation
+        // would take `lat_0`'s.
+        if let Some(ts) = s.p.angle("lat_ts")
+            && (s.phi0.abs() - HALFPI).abs() < 1e-10
+        {
+            s.phi0 = if ts < 0.0 { -HALFPI } else { HALFPI };
+        }
         let phits = s.p.angle("lat_ts").unwrap_or(HALFPI).abs();
         let mode = azimuthal_mode(s.phi0);
         let (e, es, k0, phi0) = (s.ell.e, s.ell.es, s.k0, s.phi0);
@@ -839,12 +852,16 @@ impl Stere {
                     }
                 }
                 Mode::Equit | Mode::Obliq => {
-                    let t = phi0.sin();
-                    let x = 2.0 * ssfn(phi0, t, e).atan() - HALFPI;
+                    let (t, cosphi0) = phi0.sin_cos();
+                    // The conformal latitude x of the origin, from T = tan(45° + x/2) without
+                    // `atan`: near a pole, `2 atan(T) - 90°` left cos x with a relative error of
+                    // about 1e-6 (metres at 4,000 km from an origin 1e-8° off the pole).
+                    let tan_half = if phi0 < 0.0 { cosphi0 / (1.0 - t) } else { (1.0 + t) / cosphi0 };
+                    let big_t = tan_half * ((1.0 - t * e) / (1.0 + t * e)).powf(0.5 * e);
                     let t = t * e;
-                    akm1 = 2.0 * k0 * phi0.cos() / (1.0 - t * t).sqrt();
-                    sin_x1 = x.sin();
-                    cos_x1 = x.cos();
+                    akm1 = 2.0 * k0 * cosphi0 / (1.0 - t * t).sqrt();
+                    sin_x1 = (big_t * big_t - 1.0) / (big_t * big_t + 1.0);
+                    cos_x1 = 2.0 * big_t / (big_t * big_t + 1.0);
                 }
             }
         } else {
@@ -1040,14 +1057,19 @@ impl Gauss {
         if c == 0.0 {
             return Err(err("gauss: invalid ellipsoid"));
         }
-        let chi = (sphi / c).asin();
+        // The conformal latitude chi (sin chi = sin phi0 / c), and tan(45° + x/2) of it and of phi0,
+        // from their distances to the pole, 1 - |sin|: near a pole `asin` and `tan` round chi to
+        // the pole while phi0 is not, which made `k` wrong by orders of magnitude (from about
+        // 1e-8° off a pole).
+        let to_pole = cphi2 / (1.0 + sphi.abs());
+        let d = (es * cphi2 * cphi2 / ((1.0 - es) * (c + 1.0)) + to_pole) / c;
+        let cos_chi = (d * (2.0 - d)).sqrt();
+        let chi = ((1.0 - d).copysign(sphi)).atan2(cos_chi);
+        // tan(45° + x/2) = (1 + |sin x|) / cos x, inverted for x < 0.
+        let tan_half = |to_pole: f64, cos: f64| if phi0 < 0.0 { cos / (2.0 - to_pole) } else { (2.0 - to_pole) / cos };
         let ratexp = 0.5 * c * e;
         let srat_val = srat(e * sphi, ratexp);
-        let k = if 0.5 * phi0 + FORTPI < 1e-10 {
-            1.0 / srat_val
-        } else {
-            (0.5 * chi + FORTPI).tan() / ((0.5 * phi0 + FORTPI).tan().powf(c) * srat_val)
-        };
+        let k = tan_half(d, cos_chi) / (tan_half(to_pole, cphi).powf(c) * srat_val);
         Ok((Self { c, k, e, ratexp }, chi, rc))
     }
 
@@ -1884,7 +1906,10 @@ impl Proj for EqEarth {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Hotine Oblique Mercator (variants A and B).
+// Hotine Oblique Mercator (variants A and B, and the two-point form).
+
+/// PROJ omerc.cpp's tolerance on the two points' latitudes.
+const OMERC_TOL: f64 = 1e-7;
 
 #[derive(Debug)]
 struct Omerc {
@@ -1915,9 +1940,37 @@ impl Omerc {
         let no_off = p.has("no_uoff") || p.has("no_off");
         let (e, es, one_es) = (s.ell.e, s.ell.es, s.ell.one_es);
         let phi0 = s.phi0;
-        if alpha.is_none() && gamma.is_none() {
-            return Err(err("omerc: two-point form is not supported"));
-        }
+        // Without an azimuth or a rectified grid angle, the centre line runs through two points
+        // (`lon_1`/`lat_1`, `lon_2`/`lat_2`), as in PROJ 9.8.1's omerc.cpp, with its checks. A
+        // point left out is 0, as PROJ reads it; one that isn't a number is refused.
+        let points = if alpha.is_none() && gamma.is_none() {
+            if p.has("alpha") || p.has("gamma") {
+                return Err(err("omerc: invalid alpha or gamma"));
+            }
+            let angle = |key| {
+                let value = if p.has(key) { p.angle(key) } else { Some(0.0) };
+                value.filter(|v| v.is_finite()).ok_or_else(|| err("omerc: invalid two-point parameters"))
+            };
+            let (lam1, phi1, lam2, phi2) = (angle("lon_1")?, angle("lat_1")?, angle("lon_2")?, angle("lat_2")?);
+            if phi1.abs() > HALFPI - OMERC_TOL {
+                return Err(err("omerc: |lat_1| should be < 90°"));
+            }
+            if phi2.abs() > HALFPI - OMERC_TOL {
+                return Err(err("omerc: |lat_2| should be < 90°"));
+            }
+            if (phi1 - phi2).abs() <= OMERC_TOL {
+                return Err(err("omerc: lat_1 should be different from lat_2"));
+            }
+            if phi1.abs() <= OMERC_TOL {
+                return Err(err("omerc: lat_1 should be different from 0"));
+            }
+            if (phi0.abs() - HALFPI).abs() <= OMERC_TOL {
+                return Err(err("omerc: |lat_0| should be < 90°"));
+            }
+            Some((lam1, phi1, lam2, phi2))
+        } else {
+            None
+        };
         let com = one_es.sqrt();
         let (b, a, d, mut f, e_);
         if phi0.abs() > 1e-10 {
@@ -1945,15 +1998,44 @@ impl Omerc {
             f = 1.0;
             e_ = 1.0;
         }
-        let (gamma0, alpha_c, gamma) = match (alpha, gamma) {
-            (Some(alpha_c), g) => {
+        let (gamma0, alpha_c, gamma) = match (alpha, gamma, points) {
+            (Some(alpha_c), g, _) => {
                 let gamma0 = aasin(alpha_c.sin() / d);
+                s.lam0 = lamc - aasin(0.5 * (f - 1.0 / f) * gamma0.tan()) / b;
                 (gamma0, alpha_c, g.unwrap_or(alpha_c))
             }
-            (None, Some(g)) => (g, aasin(d * g.sin()), g),
-            (None, None) => unreachable!(),
+            (None, Some(g), _) => {
+                s.lam0 = lamc - aasin(0.5 * (f - 1.0 / f) * g.tan()) / b;
+                (g, aasin(d * g.sin()), g)
+            }
+            (None, None, Some((lam1, phi1, mut lam2, phi2))) => {
+                // The central meridian and the line's azimuth on the aposphere, from the two
+                // points; `lon_0` is ignored, as in PROJ.
+                let h = tsfn(phi1, phi1.sin(), e).powf(b);
+                let l = tsfn(phi2, phi2.sin(), e).powf(b);
+                let pp = (l - h) / (l + h);
+                if pp == 0.0 {
+                    return Err(err("omerc: invalid value for eccentricity"));
+                }
+                let j = (e_ * e_ - l * h) / (e_ * e_ + l * h);
+                let con = lam1 - lam2;
+                if con < -PI {
+                    lam2 -= 2.0 * PI;
+                } else if con > PI {
+                    lam2 += 2.0 * PI;
+                }
+                s.lam0 = adjlon(0.5 * (lam1 + lam2) - (j * (0.5 * b * (lam1 - lam2)).tan() / pp).atan() / b);
+                let ff = e_ / h;
+                let denom = ff - 1.0 / ff;
+                if denom == 0.0 {
+                    return Err(err("omerc: invalid value for eccentricity"));
+                }
+                let gamma0 = (2.0 * (b * adjlon(lam1 - s.lam0)).sin() / denom).atan();
+                let alpha_c = aasin(d * gamma0.sin());
+                (gamma0, alpha_c, alpha_c)
+            }
+            (None, None, None) => unreachable!(),
         };
-        s.lam0 = lamc - aasin(0.5 * (f - 1.0 / f) * gamma0.tan()) / b;
         let singam = gamma0.sin();
         let cosgam = gamma0.cos();
         let sinrot = gamma.sin();
@@ -1961,7 +2043,8 @@ impl Omerc {
         let rb = 1.0 / b;
         let arb = a * rb;
         let bra = 1.0 / arb;
-        let u_0 = if no_off {
+        // PROJ reads `no_off` only with an azimuth or a rectified grid angle.
+        let u_0 = if no_off && points.is_none() {
             0.0
         } else {
             let u = (arb * ((d * d - 1.0).sqrt() / alpha_c.cos()).atan()).abs();
@@ -3410,6 +3493,20 @@ impl Proj for Sconic {
 #[cfg(test)]
 mod benchmark_regressions {
     use super::*;
+
+    #[test]
+    fn gauss_scale_is_finite_at_exact_poles() {
+        for e in [0.0, Ell::wgs84().e, 0.5] {
+            for phi0 in [-HALFPI, HALFPI] {
+                let (gauss, chi, radius) = Gauss::new(e, phi0).unwrap();
+                // At either pole c = 1 and the tangent ratio is 1. This is
+                // the analytic limit, including the former south-pole branch.
+                let expected = 1.0 / srat(e * phi0.sin(), 0.5 * e);
+                assert!(gauss.k.is_finite() && (gauss.k - expected).abs() < 1e-14);
+                assert!((chi - phi0).abs() < 1e-15 && radius.is_finite());
+            }
+        }
+    }
 
     #[test]
     fn mollweide_and_wagner_refuse_non_finite_inputs() {

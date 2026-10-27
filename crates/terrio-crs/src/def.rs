@@ -80,7 +80,20 @@ impl Vertical {
     /// The vertical CRS of an EPSG code.
     pub fn from_epsg(code: u32) -> Option<Self> {
         let v = epsg::vertical(code)?;
-        let models = epsg::geoid_models(code).into_iter().map(|(g, ops)| (Some(g), ops)).collect();
+        // The table does not name geoid models: `WGS 84 to EGM96 height`, as PROJ names them
+        // without the EPSG index (`(1)`).
+        let named = |g: u32, ops: Vec<Arc<datum::Op>>| -> Vec<Arc<datum::Op>> {
+            let Some(geog) = epsg::get(g) else { return ops };
+            ops.into_iter()
+                .map(|op| {
+                    if !op.name.is_empty() || op.steps.is_empty() {
+                        return op;
+                    }
+                    Arc::new(datum::Op { name: format!("{} to {}", geog.name, v.name), ..(*op).clone() })
+                })
+                .collect()
+        };
+        let models = epsg::geoid_models(code).into_iter().map(|(g, ops)| (Some(g), named(g, ops))).collect();
         Some(Self { code: Some(code), to_meter: v.to_meter, down: v.down, models, ballpark: true })
     }
 
@@ -278,6 +291,7 @@ impl Def {
     /// transformation.
     pub fn from_proj(s: &str) -> Result<Self> {
         let p = Params::parse(s);
+        p.validate_quoting()?;
         if let Some(init) = p.str("init") {
             let code = init.to_ascii_lowercase().strip_prefix("epsg:").and_then(|c| c.parse().ok());
             if let Some(code) = code {
@@ -340,6 +354,10 @@ impl Def {
             x0: p.f64("x_0").unwrap_or(0.0),
             y0: p.f64("y_0").unwrap_or(0.0),
         };
+        // As PROJ refuses it ("Invalid value for lat_0: |lat_0| should be <= 90°").
+        if setup.phi0.abs() > HALFPI + 1e-12 || !setup.phi0.is_finite() {
+            return Err(Error::Crs(format!("invalid lat_0: {} degrees", setup.phi0.to_degrees())));
+        }
         let rot = if name == "ob_tran" { Some(Rotation::from_params(&p)?) } else { None };
         let geocentric = name == "geocent";
         if geocentric && p.has("to_meter") && explicit_to_meter.is_none() {
@@ -818,6 +836,13 @@ impl Def {
     /// Whether the CRS is on WGS 84 itself.
     pub fn is_wgs84(&self) -> bool {
         self.datum == Some(6326)
+    }
+
+    /// Makes a 2D CRS 3D, with ellipsoidal heights (GDAL's `PromoteTo3D`).
+    pub fn promote_to_3d(&mut self) {
+        if !self.geocentric && self.vertical.is_none() {
+            self.three_d = true;
+        }
     }
 
     /// Whether coordinates have a height: a geographic 3D or a compound CRS.

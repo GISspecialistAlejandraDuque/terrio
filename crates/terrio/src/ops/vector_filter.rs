@@ -8,6 +8,41 @@ use crate::{Error, Result, VectorWriteOptions};
 use std::borrow::Cow;
 use wbvector::{Coord, Feature, FieldValue, Geometry, GeometryType, Layer, Ring};
 
+/// Select named layers without silently dropping requests for missing names.
+/// Retains source order and moves the layers instead of cloning their features.
+pub fn select_layers(layers: Vec<Layer>, names: &[String]) -> Result<Vec<Layer>> {
+    for name in names {
+        if !layers.iter().any(|layer| layer.name == *name) {
+            return Err(Error::InvalidArgument(format!("no layer named '{name}'")));
+        }
+    }
+    Ok(layers.into_iter().filter(|layer| names.contains(&layer.name)).collect())
+}
+
+/// Opens selected operation inputs and rejects every missing requested layer name.
+/// Keeps the file-stem alias supported by single-layer file drivers.
+pub fn open_layers(path: &str, options: &crate::VectorOpenOptions) -> Result<Vec<Layer>> {
+    let ds = crate::open_vector(path, options)?;
+    let alias = if ds.layers.len() == 1 && ds.driver != crate::formats::VectorDriver::GPKG {
+        std::path::Path::new(path).file_stem().and_then(|stem| stem.to_str())
+    } else {
+        None
+    };
+    for name in &options.layers {
+        if !ds.layers.iter().any(|layer| {
+            if ds.driver == crate::formats::VectorDriver::GPKG { layer.name.eq_ignore_ascii_case(name) } else { layer.name == *name }
+        }) {
+            // A selected subset is not proof that the source has only one layer.
+            // Inspect all names only when validating an otherwise missing stem alias.
+            if alias == Some(name.as_str()) && crate::list_layers(path)?.len() == 1 {
+                continue;
+            }
+            return Err(Error::InvalidArgument(format!("no layer named '{name}'")));
+        }
+    }
+    Ok(ds.layers)
+}
+
 /// What to do with a layer's geometries, as `ogr2ogr -nlt` does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeometryConversion {
@@ -68,6 +103,14 @@ pub struct VectorTranslateOptions {
     pub geometry_type: Option<GeometryConversion>,
     /// `-explodecollections`: write each part of multi-part geometries as its own feature.
     pub explode_collections: bool,
+    /// A per-feature geometry operation, applied after exploding collections and before the
+    /// geometry type conversion and reprojection: `-simplify` and `-segmentize`, or any
+    /// [`crate::ops::vector_geom::GeometryOp`]. A simplification that fails leaves the geometry
+    /// unchanged, as `ogr2ogr -simplify` does; other operations' errors fail the translation.
+    pub geometry_op: Option<crate::ops::vector_geom::GeometryOp>,
+    /// Propagate simplification failures instead of preserving the original geometry.
+    /// Standalone geometry commands set this; ogr2ogr-compatible conversion leaves it false.
+    pub strict_geometry_op: bool,
     /// `-s_srs`: the CRS of the input, overriding what the layer declares.
     pub src_srs: Option<SpatialRef>,
     /// `-t_srs`: reproject into this CRS.
@@ -195,6 +238,9 @@ impl Translator {
             Some(idx) => idx.iter().for_each(|&i| src.schema.add_field(layer.schema.fields()[i].clone())),
             None => src.schema = layer.schema.clone(),
         }
+        if let Some(op) = &o.geometry_op {
+            op.validate()?;
+        }
         let mut t = Self { src, options: o.clone(), filter, spatial, limit, taken: 0, mapping, schema: Layer::new(String::new()) };
         t.schema = t.finish(t.empty())?;
         Ok(t)
@@ -261,6 +307,27 @@ impl Translator {
     /// The geometry conversion, reprojection, CRS assignment and renaming of a chunk.
     fn finish(&self, mut out: Layer) -> Result<Layer> {
         let o = &self.options;
+        if let Some(op) = &o.geometry_op {
+            use crate::ops::vector_geom::GeometryOp;
+            let layer_type = out.geom_type;
+            let features = std::mem::take(&mut out.features);
+            out.features.reserve(features.len());
+            for mut f in features {
+                if let GeometryOp::Simplify { tolerance } = op
+                    && !o.strict_geometry_op
+                {
+                    if let Some(g) = &f.geometry
+                        && let Ok(simple) = crate::ops::simplify::simplify_preserve_topology(g, *tolerance)
+                    {
+                        f.geometry = Some(simple);
+                    }
+                    out.features.push(f);
+                } else {
+                    out.features.extend(op.apply_feature(f, layer_type)?);
+                }
+            }
+            out.geom_type = op.layer_type(layer_type);
+        }
         if let Some(conv) = o.geometry_type {
             for f in &mut out.features {
                 if let Some(g) = f.geometry.take() {
@@ -634,6 +701,43 @@ fn append_features(target: &mut Layer, src: &Layer) {
 mod tests {
     use super::*;
     use wbvector::{FieldDef, FieldType};
+
+    #[test]
+    fn named_selection_rejects_partial_matches() {
+        let layers = vec![Layer::new("a"), Layer::new("b")];
+        assert_eq!(select_layers(layers.clone(), &["b".into()]).unwrap()[0].name, "b");
+        assert!(select_layers(layers, &["a".into(), "missing".into()]).unwrap_err().to_string().contains("missing"));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn file_selection_rejects_partial_matches_and_keeps_stem_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("source.gpkg");
+        let layers = vec![Layer::new("a"), Layer::new("b")];
+        crate::write_vector(&layers, path.to_str().unwrap(), &Default::default()).unwrap();
+        let case_options = crate::VectorOpenOptions { layers: vec!["A".into()], ..Default::default() };
+        assert_eq!(open_layers(path.to_str().unwrap(), &case_options).unwrap()[0].name, "a");
+        let options = crate::VectorOpenOptions { layers: vec!["a".into(), "missing".into()], ..Default::default() };
+        assert!(open_layers(path.to_str().unwrap(), &options).unwrap_err().to_string().contains("missing"));
+        let path = tmp.path().join("single.geojson");
+        crate::write_vector(&layers[..1], path.to_str().unwrap(), &Default::default()).unwrap();
+        let options = crate::VectorOpenOptions { layers: vec!["single".into()], ..Default::default() };
+        assert_eq!(open_layers(path.to_str().unwrap(), &options).unwrap().len(), 1);
+        let options = crate::VectorOpenOptions { layers: vec!["single".into(), "missing".into()], ..Default::default() };
+        assert!(open_layers(path.to_str().unwrap(), &options).unwrap_err().to_string().contains("missing"));
+    }
+
+    #[test]
+    fn filtered_multilayer_file_does_not_gain_a_stem_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("source.kml");
+        std::fs::write(&path, r#"<kml xmlns="http://www.opengis.net/kml/2.2"><Document><Folder><name>a</name><Placemark><Point><coordinates>0,0</coordinates></Point></Placemark></Folder><Folder><name>b</name><Placemark><Point><coordinates>1,1</coordinates></Point></Placemark></Folder></Document></kml>"#).unwrap();
+        let options = crate::VectorOpenOptions { layers: vec!["a".into(), "source".into()], ..Default::default() };
+        assert!(open_layers(path.to_str().unwrap(), &options).unwrap_err().to_string().contains("source"));
+        let options = crate::VectorOpenOptions { layers: vec!["a".into()], ..Default::default() };
+        assert_eq!(open_layers(path.to_str().unwrap(), &options).unwrap()[0].name, "a");
+    }
 
     fn square(x: f64, y: f64, s: f64) -> Geometry {
         Geometry::polygon(vec![Coord::xy(x, y), Coord::xy(x + s, y), Coord::xy(x + s, y + s), Coord::xy(x, y + s), Coord::xy(x, y)], vec![])
