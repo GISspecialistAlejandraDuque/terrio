@@ -145,6 +145,32 @@ alg/hilbert.cpp, the latter based on public domain code by rawrunprotected).
   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
+GDAL SRTMHGT driver
+-------------------------------------------------------------------------------
+
+The tile identification, georeferencing and writing rules (and warning messages) in
+crates/terrio/src/drivers/hgt.rs follow GDAL's frmts/srtmhgt/srtmhgtdataset.cpp
+(https://github.com/OSGeo/gdal/blob/release/3.13/frmts/srtmhgt/srtmhgtdataset.cpp).
+
+  Copyright (c) 2005, Frank Warmerdam <warmerdam@pobox.com>
+  Copyright (c) 2007-2011, Even Rouault <even dot rouault at spatialys.com>
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+  and associated documentation files (the "Software"), to deal in the Software without
+  restriction, including without limitation the rights to use, copy, modify, merge, publish,
+  distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+  Software is furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all copies or
+  substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+  BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+  NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+  DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+-------------------------------------------------------------------------------
 GDAL fill nodata
 -------------------------------------------------------------------------------
 
@@ -334,11 +360,36 @@ files of GDAL's test suite are among terrio's test files (crates/terrio/tests/da
   DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-The VRT kernel filtering arithmetic in ops/vrt/virtual_raster.rs follows
-GDAL frmts/vrt/vrtfilters.cpp (GDAL 3.12.2):
+The VRT kernel filtering arithmetic in ops/neighbors.rs (shared by
+ops/vrt/virtual_raster.rs) follows GDAL frmts/vrt/vrtfilters.cpp (GDAL 3.12.2):
   Copyright (c) 2003, Frank Warmerdam <warmerdam@pobox.com>
   Copyright (c) 2008-2013, Even Rouault <even dot rouault at spatialys.com>
 The GDAL MIT permission and warranty terms above apply to this port as well.
+
+-------------------------------------------------------------------------------
+GDAL focal statistics, nearblack and gdalenhance
+-------------------------------------------------------------------------------
+
+crates/terrio/src/ops/neighbors.rs follows the kernel definitions and defaults of
+GDAL's apps/gdalalg_raster_neighbors.cpp (GDAL 3.12.2, https://github.com/OSGeo/gdal):
+  Copyright (c) 2025, Even Rouault <even dot rouault at spatialys.com>
+
+crates/terrio/src/ops/nearblack.rs ports the two-pass and flood fill collar algorithms
+of apps/nearblack_lib.cpp and apps/nearblack_lib_floodfill.cpp (GDAL 3.12.2):
+  Copyright (c) 2006, MapShots Inc (www.mapshots.com)
+  Copyright (c) 2007-2013, Even Rouault <even dot rouault at spatialys.com>
+  Copyright (c) 2023, Even Rouault <even dot rouault at spatialys.com>
+
+crates/terrio/src/ops/enhance.rs follows the equalization, LUT file and enhancement
+arithmetic of apps/gdalenhance.cpp (GDAL 3.12.2):
+  Copyright (c) 2007, Frank Warmerdam <warmerdam@pobox.com>
+  Copyright (c) 2007-2011, Even Rouault <even dot rouault at spatialys.com>
+
+The ports were initially adapted from GDAL 3.12.2. Compatibility corrections
+are checked against GDAL 3.13.3, including singleton VRT kernel application,
+NaN nodata filtering and LUT casts, and mode tie/NaN handling.
+
+Licensed under the MIT permission and warranty terms reproduced above for GDAL.
 
 -------------------------------------------------------------------------------
 GDAL weighted Brovey pansharpening and convolution
@@ -366,6 +417,19 @@ crates/terrio/src/ops/viewshed.rs adapts the edge-mode height recurrence in GDAL
 alg/viewshed/viewshed_executor.cpp (https://github.com/OSGeo/gdal), by Tamas Szekeres.
 Copyright (c) 2024 info@hobu.co. Licensed under the MIT permission and warranty
 terms reproduced above for GDAL.
+
+-------------------------------------------------------------------------------
+GDAL pixel commands: unscale, nodata-to-alpha, reclassify, as-features
+-------------------------------------------------------------------------------
+
+crates/terrio/src/ops/pixel.rs follows apps/gdalalg_raster_unscale.cpp,
+apps/gdalalg_raster_nodata_to_alpha.cpp and apps/gdalalg_raster_reclassify.cpp, the mapping
+syntax and lookup of frmts/vrt/vrtreclassifier.cpp, and the scaling and nodata arithmetic of
+the VRT complex sources in frmts/vrt/vrtsources.cpp; crates/terrio/src/ops/as_features.rs
+follows apps/gdalalg_raster_as_features.cpp; all from GDAL 3.13.3
+(https://github.com/OSGeo/gdal). Copyright (c) 2025, Even Rouault; Copyright (c) 2025,
+ISciences LLC (Daniel Baston); Copyright (c) 2001, Frank Warmerdam; Copyright (c) 2008-2013,
+Even Rouault. Licensed under the MIT permission and warranty terms reproduced above for GDAL.
 
 -------------------------------------------------------------------------------
 acadrust / ACadSharp
@@ -441,3 +505,85 @@ and src/latitudes.cpp (Karney's auxiliary-latitude series), under the same terms
 The LERC header bounds in crates/terrio/src/tiff_codecs.rs follow the
 Lerc1/Lerc2 layouts implemented by lerc-rust 0.5.0
 (https://github.com/i-norden/lerc-rust), under its MIT license.
+
+GDAL raster compare, pixel-info and gdal2xyz
+--------------------------------------------
+crates/terrio/src/ops/compare.rs follows GDAL 3.13's apps/gdalalg_raster_compare.cpp
+(report wording and order, data type unions, pixel and metadata comparisons);
+crates/terrio/src/ops/pixel_info.rs ports alg/gdal_interpolateatpoint.cpp and the
+cubic and cubic B-spline kernels of alg/gdalresamplingkernels.h (Copyright (c) 2001,
+Frank Warmerdam; 2008-2012, 2025 Even Rouault; 2024, Javier Jimenez Shaw), and follows
+apps/gdalalg_raster_pixel_info.cpp and apps/gdallocationinfo.cpp for its output; and
+crates/terrio/src/ops/xyz.rs follows swig/python/gdal-utils/osgeo_utils/gdal2xyz.py.
+GDAL is distributed under the MIT license (https://github.com/OSGeo/gdal/blob/master/LICENSE.TXT).
+
+-------------------------------------------------------------------------------
+GDAL gridding and linear referencing
+-------------------------------------------------------------------------------
+
+The gridding algorithms in crates/terrio/src/ops/vector_grid.rs are ported from GDAL's
+alg/gdalgrid.cpp, apps/gdal_grid_lib.cpp, alg/delaunay.c (barycentric coefficients and the
+point-in-triangle test) and port/cpl_quad_tree.cpp (the order of its search results); the linear
+referencing in crates/terrio/src/ops/lineref.rs is ported from apps/ogrlineref.cpp and
+ogr/ogrlinestring.cpp (getSubLine, Value) (https://github.com/OSGeo/gdal/tree/v3.13.3).
+Nearest-segment projection and point-to-segment distance are independent mathematical
+implementations; references to GEOS describe the GDAL behavior, not copied GEOS code.
+
+  Copyright (c) 2007, Andrey Kiselev <dron@ak4719.spb.edu>
+  Copyright (c) 1999-2008, Frank Warmerdam
+  Copyright (c) 2008-2015, Even Rouault <even dot rouault at spatialys.com>
+  Copyright (c) 2014, NextGIS
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+  and associated documentation files (the "Software"), to deal in the Software without
+  restriction, including without limitation the rights to use, copy, modify, merge, publish,
+  distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+  Software is furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all copies or
+  substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+  BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+  NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+  DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+-------------------------------------------------------------------------------
+GDAL vector dataset commands (concat, partition, set-field-type, make-point,
+create, export-schema, rename-layer, edit, update)
+-------------------------------------------------------------------------------
+
+crates/terrio/src/ops/concat.rs, partition.rs, make_point.rs, vector_schema.rs and
+vector_edit.rs, and crates/terrio/src/drivers/vector/gpkg_edit.rs, follow the behavior of
+these GDAL 3.13.3 sources (https://github.com/OSGeo/gdal): layer name templates, field
+merging rules, partition key percent-encoding, file naming and file-size estimates, value
+conversion rules, the OGR_SCHEMA document, layer renaming rules and feature matching.
+The ASCII replacements of Latin-1 Supplement and Latin Extended-A characters are the table
+of port/cpl_recode.cpp's CPLUTF8ForceToASCII.
+
+- apps/gdalalg_vector_concat.cpp, gdalalg_vector_partition.cpp,
+  gdalalg_vector_rename_layer.cpp, gdalalg_vector_edit.cpp, gdalalg_vector_update.cpp:
+  Copyright (c) 2025-2026, Even Rouault <even dot rouault at spatialys.com>
+- apps/gdalalg_vector_set_field_type.cpp, gdalalg_vector_export_schema.cpp,
+  gdalalg_vector_create.cpp: Copyright (c) 2025-2026, Alessandro Pasotti
+- apps/gdalalg_vector_make_point.cpp: Copyright (c) 2025, ISciences LLC (Dan Baston)
+- apps/ogrinfo_lib.cpp: Copyright (c) 1999, Frank Warmerdam; Copyright (c) 2008-2013,
+  Even Rouault
+- ogr/ogrsf_frmts/generic/ogrunionlayer.cpp: Copyright (c) 2012-2014, Even Rouault
+- port/cpl_path.cpp (CPLLaunderForFilenameSafe): Copyright (c) 1999, Frank Warmerdam;
+  Copyright (c) 2008-2012, Even Rouault
+- port/cpl_recode.cpp (CPLUTF8ForceToASCII): Copyright (c) 2011, Andrey Kiselev;
+  Copyright (c) 2008, Frank Warmerdam; Copyright (c) 2011-2014, Even Rouault
+
+Licensed under the MIT permission and warranty terms reproduced above for GDAL.
+
+Additional GDAL 3.13 raster-query source copyrights:
+- apps/gdalalg_raster_compare.cpp and apps/gdalalg_raster_pixel_info.cpp:
+  Copyright (c) 2025, Even Rouault <even dot rouault at spatialys.com>
+- apps/gdallocationinfo.cpp: Copyright (c) 2010, Frank Warmerdam <warmerdam@pobox.com>;
+  Copyright (c) 2010-2013, Even Rouault <even dot rouault at spatialys.com>
+- swig/python/gdal-utils/osgeo_utils/gdal2xyz.py:
+  Copyright (c) 2002, Frank Warmerdam <warmerdam@pobox.com>;
+  Copyright (c) 2020-2021, Idan Miara <idan@miara.com>
+Licensed under the MIT permission and warranty terms reproduced above for GDAL.

@@ -74,6 +74,25 @@ fn topology_tools_are_discoverable_and_execute_the_cli() {
 }
 
 #[test]
+fn vector_dataset_tools_are_discoverable_and_execute() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("points.geojson");
+    let output = dir.path().join("schema.json");
+    std::fs::write(&input, r#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"name":"site"},"geometry":{"type":"Point","coordinates":[0,0]}}]}"#).unwrap();
+    let replies = session(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+        call(2, "export-schema", &[input.to_str().unwrap(), "-o", output.to_str().unwrap()]),
+    ]);
+    let tools = replies[&1]["result"]["tools"].as_array().unwrap();
+    for name in ["concat", "partition", "set-field-type", "make-point", "create", "export-schema"] {
+        assert!(tools.iter().any(|t| t["name"] == name), "missing {name}");
+    }
+    assert_eq!(replies[&2]["result"]["isError"], false);
+    let schema: Value = serde_json::from_str(&std::fs::read_to_string(&output).unwrap()).unwrap();
+    assert_eq!(schema["layers"][0]["fields"][0]["name"], "name");
+}
+
+#[test]
 fn viewshed_tool_writes_height_raster() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("ridge.tif");
@@ -108,6 +127,59 @@ fn fill_nodata_is_discoverable_and_executes() {
     assert!(replies[&1]["result"]["tools"].as_array().unwrap().iter().any(|t| t["name"] == "fill-nodata"));
     assert_eq!(replies[&2]["result"]["isError"], false);
     assert_eq!(terrio::open_raster(output.to_str().unwrap()).unwrap().raster.get(0, 0, 1), 1.0);
+}
+
+#[test]
+fn pixel_tools_are_discoverable_and_execute() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("classes.asc");
+    std::fs::write(&input, "ncols 3\nnrows 1\nxllcorner 0\nyllcorner 0\ncellsize 1\nNODATA_value -9999\n1 -9999 30\n").unwrap();
+    let mapping = dir.path().join("map.txt");
+    std::fs::write(&mapping, "[0,10)=1 # low\n[10,100)=2\nNO_DATA=NO_DATA\n").unwrap();
+    let path = |name: &str| dir.path().join(name).to_str().unwrap().to_string();
+    let (unscaled, alpha, classes, pixels) = (path("unscaled.tif"), path("alpha.tif"), path("classes.tif"), path("pixels.csv"));
+    let input = input.to_str().unwrap();
+    let at_mapping = format!("@{}", mapping.to_str().unwrap());
+    let replies = session(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+        call(2, "unscale", &[input, &unscaled, "--ot", "Float64"]),
+        call(3, "nodata-to-alpha", &[input, &alpha]),
+        call(4, "reclassify", &[input, &classes, "-m", &at_mapping]),
+        call(5, "as-features", &[input, &pixels, "--skip-nodata", "--include-row-col"]),
+    ]);
+    let tools = replies[&1]["result"]["tools"].as_array().unwrap();
+    for name in ["unscale", "nodata-to-alpha", "reclassify", "as-features"] {
+        assert!(tools.iter().any(|t| t["name"] == name), "{name}");
+    }
+    for id in 2..=5 {
+        assert_eq!(replies[&id]["result"]["isError"], false, "{:?}", replies[&id]);
+    }
+    assert_eq!(terrio::open_raster(&unscaled).unwrap().raster.data_type, terrio::DataType::F64);
+    let a = terrio::open_raster(&alpha).unwrap();
+    assert_eq!((a.raster.bands, a.raster.get(1, 0, 1), a.raster.get(1, 0, 2)), (2, 0.0, 255.0));
+    let c = terrio::open_raster(&classes).unwrap();
+    assert_eq!((c.raster.get(0, 0, 0), c.raster.get(0, 0, 1), c.raster.get(0, 0, 2)), (1.0, -9999.0, 2.0));
+    let l = terrio::open_vector(&pixels, &Default::default()).unwrap();
+    assert_eq!(l.layers[0].features.len(), 2);
+}
+
+#[test]
+fn focal_collar_and_enhance_tools_are_discoverable_and_execute() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("image.asc");
+    let output = dir.path().join("max.tif");
+    std::fs::write(&input, "ncols 3\nnrows 1\nxllcorner 0\nyllcorner 0\ncellsize 1\n1 5 3\n").unwrap();
+    let replies = session(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+        call(2, "neighbors", &[input.to_str().unwrap(), output.to_str().unwrap(), "--kernel", "equal", "--method", "max"]),
+    ]);
+    let tools = replies[&1]["result"]["tools"].as_array().unwrap();
+    for name in ["neighbors", "clean-collar", "nearblack", "enhance"] {
+        assert!(tools.iter().any(|t| t["name"] == name), "missing {name}");
+    }
+    assert_eq!(replies[&2]["result"]["isError"], false, "{}", replies[&2]);
+    let out = terrio::open_raster(output.to_str().unwrap()).unwrap();
+    assert_eq!(out.raster.data.to_f64_vec(), vec![5.0, 5.0, 5.0]);
 }
 
 #[test]
@@ -272,4 +344,123 @@ fn vector_geometry_tools_are_discoverable_and_execute() {
     assert_eq!(replies[&2]["result"]["isError"], false);
     let layer = terrio::open_vector(output.to_str().unwrap(), &Default::default()).unwrap().layers.remove(0);
     assert_eq!(layer.features[0].geometry.as_ref().unwrap().all_coords().len(), 2);
+}
+
+#[test]
+fn vector_grid_and_lineref_tools_execute_the_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let points = dir.path().join("points.geojson");
+    std::fs::write(
+        &points,
+        r#"{"type":"FeatureCollection","features":[
+        {"type":"Feature","properties":{"v":1},"geometry":{"type":"Point","coordinates":[0.5,0.5]}},
+        {"type":"Feature","properties":{"v":2},"geometry":{"type":"Point","coordinates":[1.5,0.5]}},
+        {"type":"Feature","properties":{"v":3},"geometry":{"type":"Point","coordinates":[0.5,1.5]}},
+        {"type":"Feature","properties":{"v":4},"geometry":{"type":"Point","coordinates":[1.5,1.5]}}]}"#,
+    )
+    .unwrap();
+    let raster = dir.path().join("grid.tif");
+    let line = dir.path().join("route.geojson");
+    std::fs::write(&line, r#"{"type":"FeatureCollection","crs":{"type":"name","properties":{"name":"EPSG:3857"}},"features":[{"type":"Feature","properties":{},"geometry":{"type":"LineString","coordinates":[[0,0],[1000,0],[1000,1000]]}}]}"#).unwrap();
+    let stones = dir.path().join("stones.geojson");
+    std::fs::write(
+        &stones,
+        r#"{"type":"FeatureCollection","crs":{"type":"name","properties":{"name":"EPSG:3857"}},"features":[
+        {"type":"Feature","properties":{"pos":1200},"geometry":{"type":"Point","coordinates":[200,0]}},
+        {"type":"Feature","properties":{"pos":2000},"geometry":{"type":"Point","coordinates":[1000,200]}}]}"#,
+    )
+    .unwrap();
+    let parts = dir.path().join("parts.gpkg");
+    let p = |p: &std::path::Path| p.to_str().unwrap().to_string();
+    let replies = session(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+        call(2, "vector-grid", &["nearest", &p(&points), &p(&raster), "--zfield", "v", "--extent", "0", "0", "2", "2", "--size", "2", "2"]),
+        call(
+            3,
+            "lineref",
+            &["create", "--lines", &p(&line), "--points", &p(&stones), "--position-field", "pos", "--step", "500", &p(&parts)],
+        ),
+    ]);
+    let tools = replies[&1]["result"]["tools"].as_array().unwrap();
+    for name in ["vector-grid", "lineref"] {
+        assert!(tools.iter().any(|t| t["name"] == name), "missing {name}");
+    }
+    assert_eq!(replies[&2]["result"]["isError"], false, "{}", replies[&2]);
+    let out = terrio::open_raster(raster.to_str().unwrap()).unwrap();
+    assert_eq!(out.raster.get(0, 0, 0), 3.0);
+    assert_eq!(out.raster.get(0, 1, 1), 2.0);
+    assert_eq!(replies[&3]["result"]["isError"], false, "{}", replies[&3]);
+    assert!(!replies[&3].to_string().contains("could not be measured in UTM"));
+    let replies = session(&[call(1, "lineref", &["get-pos", "--parts", &p(&parts), "-x", "100", "-y", "0"])]);
+    let text = replies[&1]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("1086.956522"), "{text}");
+}
+
+#[test]
+fn compare_and_pixel_info_report_results_rather_than_failures() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |name: &str, values: Vec<f64>| {
+        let cfg = terrio::RasterConfig { cols: 3, rows: 1, cell_size: 10.0, data_type: terrio::DataType::F32, ..Default::default() };
+        let mut ds = terrio::RasterDataset::new(terrio::Raster::from_data(cfg, values).unwrap(), false);
+        ds.raster.crs.epsg = Some(32611);
+        ds.set_geo_transform([0.0, 10.0, 0.0, 10.0, 0.0, -10.0]);
+        let path = dir.path().join(name);
+        terrio::write_raster_dataset(&ds, path.to_str().unwrap(), &Default::default()).unwrap();
+        path.to_str().unwrap().to_string()
+    };
+    let a = write("a.tif", vec![1.0, 2.0, 3.0]);
+    let b = write("b.tif", vec![1.0, 2.0, 4.0]);
+    let replies = session(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+        call(2, "compare", &[&a, &b, "--skip-binary"]),
+        call(3, "pixel-info", &["-f", "text", &a, "2.5", "0.5"]),
+        call(4, "compare", &[&a, "missing.tif"]),
+    ]);
+    let tools = replies[&1]["result"]["tools"].as_array().unwrap();
+    for name in ["compare", "pixel-info", "xyz"] {
+        assert!(tools.iter().any(|t| t["name"] == name), "{name}");
+    }
+    assert_eq!(replies[&2]["result"]["isError"], false);
+    let text = replies[&2]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("1: pixels differing: 1") && text.contains("exited with status 2"), "{text}");
+    assert_eq!(replies[&3]["result"]["isError"], false);
+    assert!(replies[&3]["result"]["content"][0]["text"].as_str().unwrap().contains("Value: 3"));
+    assert_eq!(replies[&4]["result"]["isError"], true);
+}
+
+#[test]
+fn file_lists_are_refused_without_reading_the_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    // A list naming a path that does not exist: its contents would appear in the open error.
+    let list = tmp.path().join("secret.txt");
+    std::fs::write(&list, "line-that-must-not-leak\n").unwrap();
+    let list = format!("@{}", list.display());
+    let out = tmp.path().join("out.tif");
+    let replies = session(&[
+        json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}}),
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        call(1, "mosaic", &[&list, out.to_str().unwrap()]),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+    ]);
+    // The tools whose help offers `@FILE` say that tool calls refuse it; the others do not mention it.
+    let tools = replies[&2]["result"]["tools"].as_array().unwrap();
+    let description = |name: &str| tools.iter().find(|t| t["name"] == name).unwrap()["description"].as_str().unwrap().to_string();
+    // `filter merge` is reached through the `filter` tool, whose description lists subcommands.
+    for name in ["mosaic", "warp", "concat", "filter"] {
+        let d = description(name);
+        assert!(d.ends_with("Over MCP, `@FILE` lists are refused: pass each input as an item of `args`."), "{name}: {d}");
+    }
+    assert!(!description("info").contains("@FILE"));
+    // Any tool whose description mentions `@FILE` must carry the note, including one added later.
+    for t in tools {
+        let d = t["description"].as_str().unwrap();
+        if d.contains("`@FILE`") {
+            assert!(d.ends_with("Over MCP, `@FILE` lists are refused: pass each input as an item of `args`."), "{}: {d}", t["name"]);
+        }
+    }
+    let result = &replies[&1]["result"];
+    assert_eq!(result["isError"], true);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("@FILE lists are not read in MCP tool calls"), "{text}");
+    assert!(!text.contains("line-that-must-not-leak"), "{text}");
 }

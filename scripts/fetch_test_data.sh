@@ -94,6 +94,22 @@ for f in GLMELT_4X5.OCN.nc fake_SNPP_VIIRS.20230406T024200.L2.OC.NRT.nc cf_lon_l
   fake_EMIT_L2B_MIN.nc sentinel5p_fake.nc uint16_netcdf4_without_fill.nc; do
   [ -e "gdal_netcdf/$f" ] || curl -sSfL -o "gdal_netcdf/$f" "$gdal_data/netcdf/$f"
 done
+# GDAL's gdal_grid and ogrlineref test data: points on a regular grid (a test raster's pixels,
+# CSV with an OGR VRT), and a route with its milestones (Shapefiles).
+gdal_utilities=https://raw.githubusercontent.com/OSGeo/gdal/v3.13.3/autotest/utilities/data
+mkdir -p gdal_utilities
+for f in grid.csv grid.vrt path.shp path.shx path.dbf path.prj path.cpg mstones.shp mstones.shx mstones.dbf mstones.prj \
+  mstones.cpg; do
+  if [ ! -e "gdal_utilities/$f" ]; then
+    fixture_tmp=$(mktemp "gdal_utilities/$f.XXXXXX")
+    if curl -sSfL -o "$fixture_tmp" "$gdal_utilities/$f"; then
+      mv "$fixture_tmp" "gdal_utilities/$f"
+    else
+      rm -f "$fixture_tmp"
+      exit 1
+    fi
+  fi
+done
 # NASA HDF-EOS5 products, when Earthdata Login credentials are in ~/.netrc (not in CI): a VIIRS
 # Black Marble grid (geographic, LAADS), a VIIRS surface reflectance grid (sinusoidal, LP DAAC),
 # AMSR2 sea ice polar stereographic grids and a precipitation swath (NSIDC).
@@ -296,6 +312,12 @@ if command -v ogr2ogr >/dev/null && command -v gdal_translate >/dev/null; then
     gdal_translate -q -of JP2OpenJPEG -co REVERSIBLE=YES -co QUALITY=100 srtm_sub.tif srtm_sub.jp2
     gdal_translate -q -of Zarr -co FORMAT=ZARR_V3 -co COMPRESS=ZSTD srtm_sub.tif srtm_sub_v3.zarr
     gdal_translate -q -of Zarr -co COMPRESS=BLOSC -co BLOSC_CNAME=lz4 srtm_sub.tif srtm_sub_blosc.zarr
+  fi
+  # A 3" SRTM HGT tile (1201 x 1201 cells centred on the degree lines), resampled from srtm90.tif.
+  if [ ! -e N37W120.hgt ] && command -v gdalwarp >/dev/null; then
+    gdalwarp -q -overwrite -te -120.000416666666667 36.999583333333333 -118.999583333333333 38.000416666666667 \
+      -ts 1201 1201 -r bilinear srtm90.tif N37W120_tile.tif
+    gdal_translate -q -of SRTMHGT N37W120_tile.tif N37W120.hgt && rm -f N37W120_tile.tif N37W120.hgt.aux.xml
   fi
   # GeoTIFFs in the compressions GDAL writes that the tiff crate does not read: JPEG (YCbCr and
   # RGB), WebP, JPEG XL (lossless and lossy), LERC (with Deflate or Zstandard, lossless and lossy,

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Formats
+
+- SRTM HGT tiles are read and written (the `SRTMHGT` driver), as GDAL's SRTMHGT
+  driver does: 3", 1" and 0.5" tiles georeferenced from their name
+  (`N37W120.hgt`), `.hgt.zip` archives, and the NASADEM and water body variants.
+  Tiles are written as Int16 with -32768 for nodata; a grid of another size is
+  refused.
+
+### Breaking changes
+
+- `mosaic`, `warp`, `concat` and `filter merge` now treat an input beginning
+  with `@` as a file list, so a file named `@name.tif` must be written
+  `./@name.tif`.
+
+### Command line
+
+- `mosaic`, `warp`, `concat` and `filter merge` read inputs from a file list:
+  `@FILE` stands for the paths listed in FILE, one per line, as GDAL's
+  `--input @filelist.txt` does (#323). MCP tool calls refuse `@FILE`, so that a
+  client cannot read a file back through the errors naming its lines.
+
 ### CRS compatibility
 
 - Transformer construction now checks celestial-body compatibility for all CRS

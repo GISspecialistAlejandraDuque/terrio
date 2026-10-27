@@ -171,7 +171,6 @@ node js/bench/bench.mjs ../terrio-data    # timings of decoding and writing real
 See [Native multidimensional arrays](multidim.md) for scientific groups, named dimensions,
 lazy coordinate arrays, time/depth slicing, transposition and netCDF/Zarr numeric snapshots.
 
-
 ## Indexed raster catalogs
 
 `openCatalog(index, sources, options)` opens an index `Dataset`, vector file bytes or GeoJSON,
@@ -209,6 +208,26 @@ Inputs can be datasets or raster bytes. All spectral inputs contribute to intens
 `bands` selects/reorders output bands. See [pansharpen](cli.md#pansharpen) for working
 types, interpolation, nodata, bit depth and extent handling.
 
+## Focal statistics, collars and enhancement
+
+```javascript
+const max5 = terrio.neighbors(dem, { kernel: "equal", size: 5, method: "max" });
+const edges = terrio.neighbors(image, { kernel: ["gaussian", "edge2"], band: 2, ot: "Float32" });
+const clean = terrio.cleanCollar(scene, { addAlpha: true });          // flood fill
+const nb = terrio.nearblack(scene, { colors: ["0,0,0", "255,255,255"], pixelDistance: 0 });
+const lut = terrio.enhanceLuts(image, {});                            // gdalenhance's LUT file text
+const eq = terrio.enhance(image, { equalize: true });
+const again = terrio.enhance(image, { config: lut });
+```
+
+`nearblack` and `cleanCollar` accept `colors` as a single string or an array of strings.
+
+These are `terrio neighbors`, `clean-collar`, `nearblack` and `enhance` (see
+[neighbors](cli.md#neighbors), [clean-collar](cli.md#clean-collar-and-nearblack) and
+[enhance](cli.md#enhance)), on rasters in memory. Datasets hold no mask: `addMask` is refused,
+and an input's mask is not kept (use `addAlpha`). There is no in-place update; LUT files are
+passed and returned as text.
+
 ## SQL queries
 
 `sql(src, query)` returns a `Dataset` using the shared [OGR SQL subset](sql.md).
@@ -237,6 +256,44 @@ const simple = simplify(counties, 0.01);
 const sorted = sort(simple, { method: "hilbert" });
 ```
 
+## Vector datasets
+
+```js
+const merged = terrio.concat([countries, { bytes: usBytes, filename: "us.gpkg" }], { mode: "single", sourceLayerFieldName: "source" });
+const parts = terrio.partition(counties, { fields: ["STATE"], format: "GPKG" }); // [{ path, bytes }]
+const typed = terrio.setFieldType(countries, "Integer64", { fieldName: "POP_EST" });
+const points = terrio.makePoint(trace, "longitude", "latitude", { crs: "EPSG:4326" });
+const schema = terrio.exportSchema(countries); // the OGR_SCHEMA object
+const empty = terrio.createVector("empty.gpkg", { schema }); // the new file's bytes
+```
+
+These are `terrio concat`, `partition`, `set-field-type`, `make-point`, `export-schema` and
+`create` (GDAL's `gdal vector` commands of the same names), in memory: `partition` returns the
+parts' relative paths and bytes, and `createVector` the bytes of the dataset, rather than
+writing files. `exportSchema` describes the layers read (GeoPackage column declarations are
+read only from files, by the command line, Python and Rust). See
+[Vector datasets](cli.md#vector-datasets) for the options and GDAL's rules.
+
+### Renaming and updating vector datasets
+
+`renameLayer(src, options)`, `editVector(src, options)` and
+`updateVector(src, dst, options)` return a new `Dataset`, preserving their inputs.
+Serialize the result with `toBytes` to persist it.
+
+```javascript
+const renamed = terrio.renameLayer(countries, {ascii: true, lowerCase: true});
+const assigned = terrio.editVector(renamed, {crs: "EPSG:4326"});
+const updated = terrio.updateVector(changes, renamed, {key: ["name"], mode: "merge"});
+```
+
+Rename accepts `inputLayer`, `outputLayer`, `ascii`, `lowerCase`,
+`filenameCompatible`, `reservedCharacters`, `replacementCharacter`, `maxLength`.
+Edit accepts `activeLayer`, `crs` (`"none"` removes it), `geometryType`, `unsetFid`.
+CRS assignment does not transform coordinates. Dataset metadata edits require the
+native path API because the memory model does not retain dataset metadata.
+Update accepts `inputLayer`, `outputLayer`, `key`, `mode` (`merge`, `update-only`,
+`append-only`); it matches feature IDs when `key` is omitted.
+
 ## Viewshed
 
 ```javascript
@@ -247,6 +304,73 @@ const height = terrio.viewshed(dem, 500000, 4400000, { om: "GROUND", cc: 0 });
 The input can be a dataset or raster bytes. `om` selects NORMAL visibility, DEM minimum
 visible elevation, or GROUND minimum height above the DEM. `cc` is 1 minus refraction.
 See [viewshed](cli.md#viewshed) for units, curvature, radius cropping and nodata behavior.
+
+## Vector gridding and linear referencing
+
+```javascript
+const grid = terrio.vectorGrid(points, { algorithm: "invdistnn", zfield: "temp", radius: 50000, size: [200, 200] });
+const parts = terrio.linerefCreate(route, stones, { positionField: "pos", step: 1000 });
+const position = terrio.linerefPosition(parts, -1.4345, 51.9497);
+const [[x, y, z]] = terrio.linerefCoordinates(parts, 15977.724709);
+const sub = terrio.linerefSubline(parts, 13300, 17400);
+```
+
+Inputs are datasets, vector bytes or GeoJSON. `vectorGrid` options are camelCase versions of
+the Python keywords (`minPointsPerQuadrant`...). See [vector-grid](cli.md#vector-grid) and
+[lineref](cli.md#lineref).
+
+Linear reference lookups accept `{layer: "parts"}` to select a source layer.
+`linerefSubline` also accepts `layerName` to name its output layer.
+
+Reuse a Dataset, such as `terrio.open(bytes, "parts.gpkg")`, for repeated lookups; serialized
+bytes and GeoJSON are parsed on each call.
+
+
+## Compare, pixel info and XYZ
+
+```javascript
+const report = terrio.compare(reference, output, { skipBinary: true });
+console.log(report.difference_count, report.bands[0].pixels_differing, report.bands[0].max_abs_diff);
+const values = terrio.pixelInfo(dem, [[-105.5, 39.5, "site A"]], { positionCrs: "EPSG:4326", resampling: "bilinear" });
+const fromPoints = terrio.pixelInfo(dem, sitesGeoJSON, { format: "json" });
+const text = terrio.xyz(dem, { srcwin: [0, 0, 10, 10], skipNodata: true });
+```
+
+Rasters are `Dataset`s (read by window) or file bytes. `compare` makes the binary comparison
+when both inputs are bytes; GeoTIFF `TIFFTAG_*` items and RPC tags, `.aux.xml` metadata and subdatasets need files and are not compared
+in WebAssembly. `pixelInfo` takes `[x, y]`/`[x, y, text]` positions, or a vector dataset, file
+bytes or GeoJSON of points, and returns GeoJSON (an object), `json` (an array), or `csv`,
+`text` and `value` strings. `xyz` returns the text. See [compare](cli.md#compare),
+[pixel-info](cli.md#pixel-info) and [xyz](cli.md#xyz).
+
+`pixelInfo(src, positions, {format: "value", fieldSep: "|"})` selects the
+separator between band values. For vector file bytes, pass the GeoJSON result to
+`fromGeoJSON` and serialize that Dataset with `toBytes`.
+
+`xyz` returns the complete text as one JavaScript string. Use `srcwin`/`skip` for large
+XYZ exports. Native Rust XYZ writers stream the output. Byte-based `compare` copies each
+input once and reuses that buffer for binary comparison and lazy reads.
+
+
+## Pixel-wise operations
+
+```javascript
+const physical = terrio.unscale(packed, { ot: "Float64" });
+const rgba = terrio.nodataToAlpha(landsat, { nodata: 0 });
+const groups = terrio.reclassify(nlcd, "11=1;[21,25)=2;DEFAULT=0", { ot: "Byte" });
+const fromFile = terrio.reclassify(nlcd, "", { mappingFile: await (await fetch("map.txt")).text() });
+const pixels = terrio.asFeatures(dem, { geometryType: "polygon", includeXy: true, skipNodata: true });
+```
+
+Inputs are datasets or raster bytes; `asFeatures` returns a vector dataset (`toGeoJSON`,
+`toBytes`). WebAssembly cannot read local files, so a mapping file's text is passed as
+`mappingFile` instead of `@file`. See [unscale](cli.md#unscale),
+[nodata-to-alpha](cli.md#nodata-to-alpha), [reclassify](cli.md#reclassify) and
+[as-features](cli.md#as-features).
+
+For `nodataToAlpha`, non-finite overrides use the strings `"nan"`, `"inf"` or `"-inf"`
+(as a scalar or in the nodata array). Raw JavaScript non-finite numbers and explicit null
+are rejected before JSON serialization, so they cannot silently become a default override.
 
 ## Geolocation-array warping
 

@@ -652,6 +652,57 @@ function sameRaster(got, refPath, { tol = 0, nodata = true } = {}) {
   }
 }
 
+test("neighbors, collar cleaning and LUT enhancement", () => {
+  const values = new Float32Array([1, 2, 3, 4, -1, 6, 7, 8, 9]);
+  const dem = terrio.rasterFromArray(values, 3, 3, [0, 1, 0, 3, 0, -1], "EPSG:32610", -1);
+  const mean = terrio.neighbors(dem, { kernel: "equal" });
+  assert.equal(mean.dtype, "float64");
+  assert.equal(mean.readBand(1)[4], -1);
+  assert.deepEqual([...terrio.neighbors(dem, { kernel: "equal", nodata: " -9999 " }).readBand(1)],
+    [...terrio.neighbors(dem, { kernel: "equal", nodata: -9999 }).readBand(1)]);
+  assert.throws(() => terrio.neighbors(dem, { kernel: "equal", nodata: "invalid" }), /invalid nodata/);
+  assert.equal(mean.readBand(1)[0], (1 + 1 + 2 + 1 + 1 + 2 + 4 + 4) / 8);
+  const two = terrio.neighbors(dem, { kernel: ["equal", "u"], method: ["max", "sum"], ot: "Float32", nodata: "none" });
+  assert.equal(two.count, 2);
+  assert.equal(two.readBand(1)[0], 4);
+  assert.throws(() => terrio.neighbors(dem, { kernel: "sharpen", size: 5 }), /size 5/);
+
+  // A dark, noisy collar around a bright middle.
+  const img = new Uint8Array(8 * 6).map((_, i) => {
+    const [x, y] = [i % 8, Math.floor(i / 8)];
+    return x > 0 && x < 7 && y > 0 && y < 5 ? 150 + x : (x + y) % 5;
+  });
+  const scene = terrio.rasterFromArray(img, 8, 6, [0, 1, 0, 6, 0, -1], "EPSG:32610");
+  const clean = terrio.cleanCollar(scene, { addAlpha: true, pixelDistance: 0 });
+  assert.equal(clean.count, 2);
+  assert.equal(clean.readBand(1)[0], 0);
+  assert.equal(clean.readBand(2)[0], 0);
+  assert.equal(clean.readBand(2)[9], 255);
+  assert.equal(terrio.nearblack(scene, { colors: ["0"], colorThreshold: 4, pixelDistance: 0 }).readBand(1)[9], 151);
+  assert.equal(terrio.nearblack(scene, { colors: "0", colorThreshold: 4, pixelDistance: 0 }).readBand(1)[9], 151);
+  assert.throws(() => terrio.nearblack(scene, { addMask: true }), /addMask/);
+
+  const lut = terrio.enhanceLuts(scene, {});
+  assert.throws(() => terrio.enhanceLuts(scene, { config: lut }), /only computes equalization tables/);
+  assert.ok(lut.startsWith("1:Band -0.5:ScaleMin 255.5:ScaleMax "));
+  const eq = terrio.enhance(scene, { equalize: true });
+  assert.deepEqual([...terrio.enhance(scene, { config: lut }).readBand(1)], [...eq.readBand(1)]);
+  assert.deepEqual([...terrio.enhance(scene, { srcScale: [0, 256] }).readBand(1)], [...img]);
+  assert.throws(() => terrio.enhance(scene, {}), /equalize/);
+  assert.throws(() => terrio.cleanCollar(scene, { white: true, colors: "0" }), /exclusive/);
+  for (const [nodata, expected] of [[-9999, 241], [300, 44], [Infinity, 0]]) {
+    const source = terrio.rasterFromArray(new Float64Array([nodata, 128]), 2, 1,
+      [0, 1, 0, 1, 0, -1], "EPSG:32610", nodata);
+    assert.deepEqual([...terrio.enhance(source, { srcScale: [0, 256] }).readBand(1)], [expected, 128]);
+  }
+  const nodata = 1.0000000001;
+  const source = terrio.rasterFromArray(new Float64Array([nodata, 1]), 2, 1,
+    [0, 1, 0, 1, 0, -1], "EPSG:32610", nodata);
+  const precise = terrio.enhance(source, { srcScale: [0, 256], ot: "Float64" });
+  assert.equal(precise.nodata, nodata);
+  assert.deepEqual([...precise.readBand(1)], [nodata, 1]);
+});
+
 test("operations on in-memory rasters and layers", () => {
   const data = new Float32Array(20 * 10).map((_, i) => (i % 20) * 10 + Math.floor(i / 20));
   const dem = terrio.rasterFromArray(data, 20, 10, [500000, 30, 0, 4100000, 0, -30], "EPSG:32610", -9999);
@@ -1169,6 +1220,89 @@ test("SQL computed columns, DISTINCT and summary aggregates", () => {
   assert.equal(terrio.sql(src, "SELECT DISTINCT v FROM layer").toGeoJSON().features.length, 2);
 });
 
+test("vector dataset commands: concat, partition, setFieldType, makePoint, schemas", () => {
+  const places = (name) => ({ type: "FeatureCollection", name, features: [["TN", 1, "-86.5"], ["NY", 2, "-74"], ["TN", 3, "x"]].map(
+    ([state, n, lon], i) => ({ type: "Feature", geometry: { type: "Point", coordinates: [i, i] }, properties: { state, n, lon, lat: 36 } }),
+  ) });
+  const a = terrio.fromGeoJSON(places("a"), "a");
+  const merged = terrio.concat([a, { bytes: a.toBytes("b.gpkg"), filename: "b.gpkg" }], { mode: "single", sourceLayerFieldName: "src" });
+  assert.deepEqual(merged.layerNames(), ["merged"]);
+  const features = merged.toGeoJSON().features;
+  assert.equal(features.length, 6);
+  assert.equal(features[5].properties.src, "b_a"); // {AUTO_NAME}: the file and layer names
+  assert.throws(() => terrio.concat([a], { outputLayer: "x" }), /merge-per-layer-name/);
+  assert.throws(() => terrio.concat([a], { mode: "single", sourceLayerFieldName: "state" }), /source-layer field.*already exists/);
+
+  const parts = terrio.partition(a, { fields: ["state"], format: "GeoJSON" });
+  assert.deepEqual(parts.map((p) => p.path), ["a/state=TN/part_0000000001.json", "a/state=NY/part_0000000001.json"]);
+  assert.equal(terrio.open(parts[0].bytes, "p.json").toGeoJSON().features.length, 2);
+
+  const typed = terrio.setFieldType(a, "String", { fieldName: "n" }).toGeoJSON();
+  assert.equal(typed.features[2].properties.n, "3");
+  assert.throws(() => terrio.setFieldType(a, "Real", { fieldName: "nope" }), /cannot find field/);
+
+  const two = terrio.fromGeoJSON({ type: "FeatureCollection", features: places("a").features.slice(0, 2) });
+  const pts = terrio.makePoint(two, "lon", "lat", { crs: "EPSG:4326" }).toGeoJSON();
+  assert.deepEqual(pts.features[1].geometry.coordinates, [-74, 36]);
+  assert.throws(() => terrio.makePoint(a, "lon", "lat"), /invalid value/);
+
+  const bytes = terrio.createVector("new.gpkg", { outputLayer: "sites", geometryType: "POINT", crs: "EPSG:32633", fields: ["name:STRING(20)", "total:INTEGER64"] });
+  const schema = terrio.exportSchema({ bytes, filename: "new.gpkg" });
+  assert.equal(schema.layers[0].name, "sites");
+  assert.equal(schema.layers[0].geometryFields[0].type, "Point");
+  assert.deepEqual(schema.layers[0].geometryFields[0].coordinateSystem, { authid: "EPSG:32633" });
+  assert.deepEqual(schema.layers[0].fields.map((f) => f.type), ["String", "Integer64"]);
+  const copy = terrio.createVector("copy.gpkg", { schema });
+  assert.deepEqual(terrio.exportSchema({ bytes: copy, filename: "copy.gpkg" }), schema);
+  for (const base of [{ schema }, { like: a }]) {
+    for (const explicit of [{ fields: [] }, { geometryType: "POINT" }, { crs: "EPSG:4326" }, { fid: "rowid" }]) {
+      assert.throws(() => terrio.createVector("invalid.gpkg", { ...base, ...explicit }), /give one of schema, like, or explicit fields/);
+    }
+  }
+  a.free(); merged.free();
+});
+
+test("unscale, nodataToAlpha, reclassify and asFeatures", () => {
+  const gt = [100, 10, 0, 50, 0, -10];
+  const src = terrio.rasterFromArray(new Uint8Array([1, 2, 255, 40]), 2, 2, gt, "EPSG:32611", 255);
+  const alpha = terrio.nodataToAlpha(src);
+  assert.equal(alpha.count, 2);
+  assert.deepEqual([...alpha.readBand(2)], [255, 255, 0, 255]);
+  assert.deepEqual([...terrio.nodataToAlpha(src, null).readBand(2)], [255, 255, 0, 255]);
+  assert.deepEqual([...terrio.nodataToAlpha(src, { nodata: 1 }).readBand(2)], [0, 255, 255, 255]);
+  assert.throws(() => terrio.nodataToAlpha(src, { nodata: NaN }), /strings/);
+  assert.throws(() => terrio.nodataToAlpha(src, { nodata: Infinity }), /strings/);
+  assert.throws(() => terrio.nodataToAlpha(src, { nodata: null }), /null/);
+  assert.throws(() => terrio.nodataToAlpha(src, { nodata: [NaN] }), /strings/);
+  const special = terrio.rasterFromArray(new Float64Array([NaN, Infinity, -Infinity, 3]), 2, 2, gt);
+  for (const [nodata, expected] of [["nan", [0, 255, 255, 255]], ["inf", [255, 0, 255, 255]], ["-inf", [255, 255, 0, 255]]]) {
+    assert.deepEqual([...terrio.nodataToAlpha(special, { nodata }).readBand(2)], expected);
+  }
+  const fractional = terrio.rasterFromArray(new Float32Array([0.1, 0.2]), 2, 1, gt, "EPSG:32611", 0.1);
+  assert.equal(terrio.asFeatures(fractional, { skipNodata: true }).toGeoJSON().features.length, 1);
+  assert.deepEqual(Object.keys(terrio.asFeatures(src, { bands: [1, 1] }).toGeoJSON().features[0].properties), ["BAND_1"]);
+  const rc = terrio.reclassify(src, "[0,3)=1;[3,50]=2;NO_DATA=NO_DATA");
+  assert.deepEqual([...rc.readBand(1)], [1, 1, 255, 2]);
+  const fromFile = terrio.reclassify(src, "", { mappingFile: "# c\n[0,3)=7\nDEFAULT=PASS_THROUGH\n", ot: "Int16" });
+  assert.equal(fromFile.dtype, "int16");
+  assert.deepEqual([...fromFile.readBand(1)], [7, 7, 255, 40]);
+  assert.throws(() => terrio.reclassify(src, "1=2"), /no specified mapping/);
+  assert.throws(() => terrio.reclassify(src, "@map.txt"), /mappingFile/);
+  const nanSource = terrio.rasterFromArray(new Float32Array([NaN, 1]), 2, 1,
+    [0, 1, 0, 1, 0, -1], "EPSG:32610", NaN);
+  const intervals = Array.from({length: 81}, (_, i) => (i * 37) % 81)
+    .map(i => i === 80 ? "NO_DATA=0" : `${i}=${i}`).join(";");
+  assert.throws(() => terrio.reclassify(nanSource, intervals), /overlaps/);
+  assert.throws(() => terrio.reclassify(src, "1=2", {mappingFile: "1=3"}), /not both/);
+  const scaled = terrio.unscale(src.toBytes("s.tif"), { ot: "Float64" });
+  assert.equal(scaled.dtype, "float64");
+  const fc = terrio.asFeatures(src, { geometryType: "polygon", skipNodata: true, includeRowCol: true }).toGeoJSON();
+  assert.equal(fc.features.length, 3);
+  assert.deepEqual(fc.features[2].properties, { ROW: 1, COL: 1, BAND_1: 40 });
+  assert.deepEqual(fc.features[0].geometry.coordinates[0][1], [100, 40]);
+  assert.throws(() => terrio.asFeatures(src, { geometryType: "line" }), /geometry type/);
+});
+
 test("viewshed visibility, height and byte input", () => {
   const dem = terrio.rasterFromArray(new Float64Array([0, 0, 10, 0, 0]), 5, 1, [0, 10, 0, 10, 0, -10], "EPSG:32611");
   assert.deepEqual([...terrio.viewshed(dem, 5, 5, { cc: 0 }).readBand(1)], [255, 255, 255, 0, 0]);
@@ -1583,6 +1717,79 @@ test("vector geometry operations: simplify, segmentize, hulls, swap-xy, set-geom
   assert.throws(() => terrio.simplify(line, -1), /tolerance/);
 });
 
+test("vectorGrid and linear referencing (gdal_grid, ogrlineref)", () => {
+  const pts = (rows, field = "v") => ({
+    type: "FeatureCollection",
+    features: rows.map(([x, y, v]) => ({ type: "Feature", properties: { [field]: v }, geometry: { type: "Point", coordinates: [x, y] } })),
+  });
+  const src = pts([[0.5, 0.5, 1], [1.5, 0.5, 2], [0.5, 1.5, 3], [1.5, 1.5, 4]]);
+  const r = terrio.vectorGrid(src, { algorithm: "nearest", zfield: "v", extent: [0, 0, 2, 2], size: [2, 2] });
+  assert.deepEqual([r.width, r.height], [2, 2]);
+  assert.deepEqual(Array.from(r.readBand(1)), [3, 4, 1, 2]);
+  const count = terrio.vectorGrid(src, { algorithm: "count", radius: 5, zfield: "v", extent: [0, 0, 2, 2], size: [1, 1], ot: "Byte" });
+  assert.equal(count.readBand(1)[0], 4);
+  const idw = terrio.vectorGrid(src, { algorithm: "invdist:power=1", zfield: "v", extent: [0, 0, 2, 2], size: [1, 1] });
+  assert.ok(Math.abs(idw.readBand(1)[0] - 2.5) < 1e-12);
+  assert.throws(() => terrio.vectorGrid(src, { algorithm: "kriging" }));
+  const named = terrio.fromGeoJSON(src, "a");
+  assert.throws(() => terrio.vectorGrid(named, { algorithm: "nearest", layers: ["a", "missing"] }), /missing/);
+  const common = { zfield: "v", extent: [0, 0, 2, 2], size: [2, 2] };
+  const keyword = terrio.vectorGrid(src, { ...common, algorithm: "invdist", minPointsPerQuadrant: 1, maxPoints: 5 });
+  const string = terrio.vectorGrid(src, { ...common, algorithm: "invdist:min_points_per_quadrant=1:max_points=5" });
+  assert.deepEqual([...keyword.readBand(1)], [...string.readBand(1)]);
+  const line = { type: "FeatureCollection", features: [{ type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: [[0, 0], [1000, 0], [1000, 1000]] } }] };
+  const stones = pts([[200, 0, 1200], [1000, 200, 2000], [1000, 700, 2500]], "pos");
+  const projectedLine = terrio.fromGeoJSON(line, undefined, "EPSG:3857");
+  const projectedStones = terrio.fromGeoJSON(stones, undefined, "EPSG:3857");
+  const parts = terrio.linerefCreate(projectedLine, projectedStones, { positionField: "pos", step: 500 });
+  const fc = parts.toGeoJSON();
+  assert.deepEqual(fc.features.map((f) => f.properties.beg), [1000, 1500, 2000, 2500]);
+  assert.ok(Math.abs(terrio.linerefPosition(parts, 100, 0) - (1000 + 100 / 1.15)) < 1e-9);
+  const [[x, y]] = terrio.linerefCoordinates(parts, 2250);
+  assert.ok(Math.abs(x - 1000) < 1e-9 && Math.abs(y - 450) < 1e-9);
+  assert.throws(() => terrio.linerefPosition(parts, 100, 0, {layer: "missing"}), /no layer named/);
+  const sub = terrio.linerefSubline(parts, 1100, 2100, {layerName: "selected"}).toGeoJSON();
+  assert.equal(sub.features.length, 1);
+  assert.ok(Math.abs(sub.features[0].geometry.coordinates[0][0] - 115) < 1e-9);
+});
+
+test("compare, pixelInfo and xyz", () => {
+  const values = Float64Array.from({ length: 20 }, (_, i) => i);
+  const a = terrio.rasterFromArray(values, 5, 4, [100, 10, 0, 240, 0, -10], "EPSG:32611");
+  const edited = Float64Array.from(values);
+  edited[7] += 2.5;
+  const b = terrio.rasterFromArray(edited, 5, 4, [100, 10, 0, 240, 0, -10], "EPSG:32611");
+  assert.equal(terrio.compare(a, a).difference_count, 0);
+  const c = terrio.compare(a, b);
+  assert.deepEqual(c.differences.map((d) => d.message), ["1: pixels differing: 1", "1: maximum pixel value difference: 2.500000"]);
+  assert.equal(c.bands[0].pixels_differing, 1);
+  const bytes = a.toBytes("a.tif");
+  assert.equal(terrio.compare(bytes, bytes).difference_count, 0);
+  const otherBytes = b.toBytes("b.tif");
+  assert.equal(terrio.compare(bytes, otherBytes).differences[0].kind, "binary");
+  const reads = [0, 0];
+  const named = (payload, index) => ({ get bytes() { reads[index]++; return payload; }, filename: `${index}.tif` });
+  assert.equal(terrio.compare(named(bytes, 0), named(otherBytes, 1)).differences[0].kind, "binary");
+  assert.deepEqual(reads, [1, 1]);
+  assert.equal(terrio.compare(bytes, b, {skipBinary: true, skipMetadata: true}).difference_count, c.difference_count);
+  assert.equal(terrio.compare(a, otherBytes, {skipBinary: true, skipMetadata: true}).difference_count, c.difference_count);
+
+  const twoBands = terrio.rasterFromArray(new Float64Array([0, 10]), 1, 1, [0, 1, 0, 1, 0, -1]);
+  assert.equal(terrio.pixelInfo(twoBands, [[0, 0]], {format: "value", fieldSep: "|"}), "0|10\n");
+  const g = terrio.pixelInfo(a, [[125, 225, "site"]], { positionCrs: "dataset", resampling: "bilinear" });
+  assert.equal(g.crs.properties.name, "urn:ogc:def:crs:EPSG::32611");
+  assert.equal(g.features[0].properties.extra_content, "site");
+  const marked = terrio.pixelInfo(a, [[0.5, 0.5, "\0NaN"]]);
+  assert.equal(marked.features[0].properties.extra_content, "\0NaN");
+  assert.equal(g.features[0].properties.bands[0].raw_value, 7);
+  assert.equal(terrio.pixelInfo(a, [[0.5, 0.5]], { format: "text" }), "Report:\n  Location: (0P,0L)\n  Band 1:\n    Value: 0\n");
+  const points = { type: "FeatureCollection", features: [{ type: "Feature", properties: { id: 3 }, geometry: { type: "Point", coordinates: [125, 225] } }] };
+  const fromLayer = terrio.pixelInfo(a, points, { positionCrs: "dataset", format: "json" });
+  assert.equal(fromLayer[0].bands[0].value, 7);
+
+  assert.equal(terrio.xyz(a, { skip: [2], srcwin: [0, 0, 5, 1] }), "105.000 235.000 0\n125.000 235.000 2\n145.000 235.000 4\n");
+});
+
 test("promoteTo3d transforms ellipsoidal heights of a 2D CRS", () => {
   // GDAL 3.12.2 / PROJ 9.8.1, RD New to WGS 84 3D, without grids.
   const args = [[85000], [447000], "EPSG:28992", "EPSG:4979", [0]];
@@ -1614,4 +1821,19 @@ test("promoteTo3d applies to vector toBytes and preserves 2D geometry", () => {
 test("unterminated quoted PROJ values raise an error", () => {
   assert.throws(() => terrio.transformPoints([10], [40], "EPSG:4326",
     '+proj=tmerc +datum=WGS84 +title="abc +k=0.9996'), /unterminated quoted PROJ value/);
+});
+
+
+test("vector dataset commands: rename, edit and key update preserve source datasets", () => {
+  const geo = (rows) => ({ type: "FeatureCollection", features: rows.map(([name, n], i) => ({ type: "Feature", properties: {name, n}, geometry: {type: "Point", coordinates: [i, i]} })) });
+  const original = terrio.concat([geo([["x", 1], ["y", 2]])], {mode: "single", outputLayer: "Café"});
+  const renamed = terrio.renameLayer(original, {ascii: true, lowerCase: true});
+  assert.equal(terrio.exportSchema(renamed).layers[0].name, "cafe");
+  assert.equal(terrio.exportSchema(original).layers[0].name, "Café");
+  const edited = terrio.editVector(renamed, {crs: "EPSG:3857"});
+  assert.equal(terrio.exportSchema(edited).layers[0].geometryFields[0].coordinateSystem.authid, "EPSG:3857");
+  const updated = terrio.updateVector(geo([["x", 9], ["z", 3]]), renamed, {key: ["name"]});
+  assert.equal(updated.info().layers[0].feature_count, 3);
+  assert.equal(renamed.info().layers[0].feature_count, 2);
+  assert.throws(() => terrio.editVector(original, {metadata: ["A=B"]}), /unknown field/);
 });

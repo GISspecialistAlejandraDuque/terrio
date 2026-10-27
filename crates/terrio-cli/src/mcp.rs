@@ -37,7 +37,7 @@ const INSTRUCTIONS: &str = "terrio reads, writes and converts geospatial rasters
 - Start with info (--json) to see what a dataset holds; formats lists the formats terrio reads and writes.";
 
 /// Commands that only read: they write no file.
-const READ_ONLY: &[&str] = &["info", "formats", "crs", "mdinfo", "mdread"];
+const READ_ONLY: &[&str] = &["info", "formats", "crs", "mdinfo", "mdread", "compare"];
 
 type RpcError = (i64, String);
 
@@ -206,14 +206,15 @@ fn call_tool(terrio: &[OsString], name: &str, args: Vec<OsString>, cancel: &Atom
                 }
                 text.push_str(&stderr);
             }
-            if !status.success() {
+            let failed = !status.success();
+            if failed {
                 let code = status.code().map_or_else(|| "a signal".to_string(), |c| format!("exit code {c}"));
                 text.push_str(&format!("\n(terrio {name} failed with {code})"));
             }
             if text.trim().is_empty() {
                 text = format!("terrio {name} finished.");
             }
-            (text, !status.success())
+            (text, failed)
         }
         Err(e) => (format!("could not run terrio: {e}"), true),
     };
@@ -231,6 +232,7 @@ fn run(terrio: &[OsString], name: &str, args: Vec<OsString>, cancel: &AtomicBool
         .args(before)
         .arg(name)
         .args(args)
+        .env("TERRIO_MCP_TOOL", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -334,14 +336,24 @@ fn commands() -> impl Iterator<Item = clap::Command> {
     cli.get_subcommands().filter(|c| !matches!(c.get_name(), "mcp" | "help")).cloned().collect::<Vec<_>>().into_iter()
 }
 
+/// Whether the help of `c` or of one of its subcommands (`filter merge`) offers `@FILE` lists.
+fn offers_file_lists(c: &mut clap::Command) -> bool {
+    c.render_long_help().to_string().contains("`@FILE`") || c.get_subcommands_mut().any(offers_file_lists)
+}
+
 fn tool_list() -> Vec<Value> {
     commands()
         .map(|mut c| {
             let name = c.get_name().to_string();
             let ro = READ_ONLY.contains(&name.as_str());
+            let mut description = c.render_long_help().to_string().trim_end().to_string();
+            // The help offers `@FILE` input lists, which tool calls refuse (`expand_file_lists`).
+            if offers_file_lists(&mut c) {
+                description.push_str("\n\nOver MCP, `@FILE` lists are refused: pass each input as an item of `args`.");
+            }
             json!({
                 "name": name,
-                "description": c.render_long_help().to_string().trim_end(),
+                "description": description,
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -462,5 +474,12 @@ mod tests {
         assert!(clip("abc".into(), MAX_OUTPUT + 1, MAX_OUTPUT).ends_with(&format!("of {} bytes)", MAX_OUTPUT + 1)));
         assert_eq!(clip("abc".into(), 3, MAX_OUTPUT), "abc");
         assert_eq!(clip("abc".into(), 3, 1), "a\n… (output cut at 1 of 3 bytes)");
+    }
+    #[cfg(unix)]
+    #[test]
+    fn panicked_query_tool_is_an_error() {
+        let command = vec!["sh".into(), "-c".into(), "echo \"thread 'main' panicked at source.rs:1\" >&2; exit 101".into()];
+        let result = call_tool(&command, "compare", Vec::new(), &AtomicBool::new(false)).unwrap();
+        assert_eq!(result["isError"], true);
     }
 }

@@ -21,10 +21,13 @@ Suites:
     vrt               serialized warped/derived/kernel VRTs, masks and lazy windows
     overviews         source overview selection and HTTP COG bytes vs gdalwarp -ovr
     dem-calc          dem, calc, proximity, sieve vs GDAL's tools (compare_dem_calc_with_gdal.py)
+    raster-query      compare, pixel-info and xyz vs gdal raster compare, gdal raster pixel-info,
+                      gdallocationinfo and gdal2xyz.py (compare_raster_query_with_gdal.py)
     vector-ops        ogr2ogr options, rasterize, polygonize (compare_vector_ops_with_gdal.py)
     analysis-output   zonal/point-sampling output reprojection and decimal rounding
     footprint         raster footprints, source/custom fields and singleparts vs GDAL
     topology          buffer, polygon overlay/dissolve, validity, repair and cleanup vs GEOS
+    vector-dataset    concat, partition, set-field-type, make-point, create, export-schema, rename-layer, edit, update
     vector-geom       simplify, segmentize, hulls, swap-xy, set-geom-type, combine and sort vs
                       gdal vector and GEOS (compare_vector_geom_with_gdal.py)
     arrow             Arrow and GeoArrow export and import (compare_arrow_with_gdal.py)
@@ -400,10 +403,14 @@ def classify_raster(r):
     same = [k for k in ("same_type", "same_crs", "same_nodata", "same_metadata") if r.get(k) is False]
     if same:
         return DIFFERS, ", ".join(k.replace("same_", "") + " differs" for k in same)
+    if r.get("same_georeferencing") is False and not r.get("accepted_georeferencing_difference"):
+        return DIFFERS, "georeferencing differs"
     if r.get("valid_mismatch"):
         return DIFFERS, f"{r['valid_mismatch']} pixels valid in one output only"
     n = r.get("differing", 0)
     if n == 0:
+        if r.get("same_georeferencing") is False:
+            return TOLERANCE, r["accepted_georeferencing_difference"]
         return IDENTICAL, ""
     detail = f"{n} pixels differ ({100 * (1 - r['exact']):.4g} %)"
     if r.get("max_diff") == float("inf") or r.get("inf_diff"):
@@ -655,6 +662,104 @@ def suite_pansharpen(ctx):
         "weights, selected outputs, bit depth, nodata borders, integer clipping and union/intersection "
         "extents. Compare every pixel, dimensions, type, nodata and geotransform; integer cases "
         "are exact, and Float32 allows 0.002 (one ULP at the scene's radiometric scale).", 1,
+    )
+
+
+def suite_vector_grid(ctx):
+    """Scattered points gridded by every gdal_grid algorithm, against GDAL."""
+    return suite_json_ops(
+        ctx, "vector-grid", "compare_vector_grid_with_gdal.py", "Vector gridding", "`gdal_grid`",
+        "Natural Earth populated places (geographic, above and below GDAL's 100-point quadtree "
+        "threshold), GDAL's regular grid test points and an Autzen lidar subset (3D) gridded by "
+        "every algorithm (invdist, invdistnn, average, nearest, the data metrics and linear) with "
+        "search ellipses, rotations, point and per-quadrant limits, and the Z, WHERE, SQL, layer, "
+        "clipping, extent, size, resolution, type and CRS options. Every pixel, the type, nodata "
+        "and geotransform are compared. GDAL's default invdist is also run with its double-"
+        "precision code (`GDAL_USE_AVX=NO`, `GDAL_USE_SSE=NO`). Known differences: linear "
+        "interpolation rounds differently (vertex order of spade's triangles against "
+        "qhull's) and breaks the ties of a regular grid's co-circular points differently; GDAL's "
+        "default SIMD invdist is single precision; GDAL 3.12 sums rotated ellipses in another "
+        "order than GDAL 3.13 and terrio.", 1,
+    )
+
+
+def suite_lineref(ctx):
+    """ogrlineref's parts, positions, coordinates and sublines on a real route."""
+    s = Suite(
+        "lineref",
+        "Linear referencing",
+        "`ogrlineref`",
+        "GDAL's test route (geographic, projected to UTM, and as two routes told apart by a field, "
+        "one drawn backwards) with its milestones: the parts' positions, scales and vertices, the "
+        "positions and coordinates as ogrlineref prints them, and sublines vertex by vertex. The "
+        "first and last parts of a geographic route are measured in UTM by terrio's projection "
+        "rather than PROJ (within 1e-9).",
+    )
+    _code, out, err = run([sys.executable, str(SCRIPTS / "compare_lineref_with_gdal.py"), ctx.data, "--terrio", ctx.terrio, "--json"])
+    try:
+        results = json.loads(out)
+    except json.JSONDecodeError:
+        s.error = tail(err or out)
+        return s
+    status = {"identical": IDENTICAL, "tolerance": TOLERANCE}
+    for r in results:
+        s.cases.append(Case(r["operation"], r["name"], status.get(r["status"], DIFFERS), r.get("detail", "")))
+    return s
+
+
+def suite_raster_query(ctx):
+    """terrio compare, pixel-info and xyz against GDAL's raster compare, pixel-info and gdal2xyz."""
+    suite = Suite(
+        "raster-query",
+        "Raster comparison, pixel queries and XYZ text",
+        "`gdal raster compare`, `gdal raster pixel-info`, `gdallocationinfo`, `gdal2xyz.py` (GDAL 3.13.3)",
+        "Real DEMs, Landsat, OPERA, ECOSTRESS, NLCD and netCDF rasters and derived copies. compare: the same "
+        "report lines and exit status (CRS WKT text, and the two values GDAL swaps in its metadata value "
+        "message, normalized). pixel-info: GeoJSON and CSV values parsed and compared (CSV to GDAL 3.13's "
+        "15 significant digits), gdallocationinfo text and -valonly byte for byte. xyz: output byte for "
+        "byte. Within tolerance: numbers within 1e-9 relative (terrio's projection arithmetic, one-ULP "
+        "scale/offset products).",
+    )
+    _code, out, err = run([sys.executable, str(SCRIPTS / "compare_raster_query_with_gdal.py"), ctx.data, "--terrio", ctx.terrio, "--json"])
+    try:
+        results = json.loads(out)
+    except json.JSONDecodeError:
+        suite.error = tail(err or out)
+        return suite
+    statuses = {"identical": IDENTICAL, "within tolerance": TOLERANCE}
+    for result in results:
+        status = statuses.get(result["status"], DIFFERS)
+        suite.cases.append(Case(result["operation"], result["name"], status, result.get("detail", "") if status != IDENTICAL else ""))
+    return suite
+
+
+def suite_raster_pixel(ctx):
+    """Pixel-wise raster commands against GDAL's unified ``gdal raster`` commands."""
+    return suite_json_ops(
+        ctx, "raster-pixel", "compare_raster_pixel_with_gdal.py", "Pixel-wise raster commands",
+        "`gdal raster unscale`, `nodata-to-alpha`, `reclassify` and `as-features`",
+        "Real USGS, Landsat, ECOSTRESS, NLCD and Sentinel-5P rasters (windows, packed copies with "
+        "band scales and offsets, and controlled nodata holes): size, type, nodata, CRS, band color "
+        "interpretations, scales, offsets and affine transforms must match, then every pixel is compared exactly. "
+        "The known Sentinel-5P default-grid difference is reported separately as within tolerance. "
+        "Feature outputs: feature count, field names, every field value and geometry vertex, exactly.",
+        1,
+    )
+
+
+def suite_focal(ctx):
+    """Real imagery and terrain against gdal raster neighbors, nearblack, clean-collar and gdalenhance."""
+    return suite_json_ops(
+        ctx, "focal", "compare_focal_with_gdal.py", "Focal statistics, collars and enhancement",
+        "`gdal raster neighbors`, `nearblack`, `gdal raster clean-collar`, `gdalenhance`",
+        "Sentinel-2 true-color and red-band images, the Landsat 7 scene (with and without an alpha "
+        "band or mask) and a USGS DEM (also with deliberate nodata holes): every built-in kernel, "
+        "matrix kernels, every method, output types and nodata; both collar algorithms with colors, "
+        "thresholds, distances, alpha, masks and in-place updates; equalization, LUT file output "
+        "and LUT file input. Every pixel, mask, type, nodata and geotransform must match exactly "
+        "(tolerance 0); LUT files are compared token by token. For the in-place flood fill of a raster "
+        "with an alpha band, GDAL 3.12 writes stale alpha values on modified lines; that case compares "
+        "the color bands with GDAL's update and the alpha band with GDAL's new-file output.", 1,
     )
 
 
@@ -1408,6 +1513,73 @@ def suite_topology(ctx):
     return s
 
 
+def suite_vector_dataset(ctx):
+    """Dataset-level vector commands against GDAL's gdal vector commands."""
+    s = Suite(
+        "vector-dataset",
+        "Vector dataset commands",
+        "GDAL vector concat, partition, set-field-type, make-point, create, export-schema, rename-layer, edit and update",
+        "Natural Earth countries and places, US and Tennessee counties, Las Vegas roads and "
+        "a GPS trace: OGR_SCHEMA members, created schemas, field type conversions, "
+        "concatenated, partitioned and point layers read back by GDAL. Values exact; "
+        "coordinates of layers reprojected to a common CRS within 1e-9 (degrees) or 1e-6 "
+        "(metres). Int16, Float32 and JSON subtypes stored without the subtype are within "
+        "tolerance. Renames use OGRLayer::Rename as the reference; edits use gdal vector edit; "
+        "updates use GDAL's 3.13 update API. GeoPackage validity and R-tree results are checked.",
+    )
+    if missing_modules("osgeo"):
+        s.skipped = "needs osgeo"
+        return s
+    from osgeo import gdal
+
+    if int(gdal.VersionInfo("VERSION_NUM")) < 3130000:
+        s.skipped = "needs GDAL >= 3.13 for the complete vector dataset suite"
+        return s
+    tools = [t for t in ("gdal", "ogr2ogr", "ogrinfo", "ogrmerge.py") if shutil.which(t) is None]
+    if tools:
+        s.skipped = "needs the GDAL command-line tools (" + ", ".join(tools) + ")"
+        return s
+    needed = ("countries.gpkg", "UScounties.gpkg", "multi.gpkg", "TN_Counties.geojson", "las_vegas_roads.geojson", "hike_gps_trace.csv", "ne_places/ne_10m_populated_places_simple.shp")
+    if any(not os.path.isfile(os.path.join(ctx.data, name)) for name in needed):
+        s.skipped = "needs the vector test data (scripts/fetch_test_data.sh)"
+        return s
+    with tempfile.TemporaryDirectory(prefix="terrio-vector-dataset-") as tmp:
+        report = os.path.join(tmp, "report.json")
+        code, out, err = run(
+            [
+                sys.executable,
+                str(SCRIPTS / "compare_vector_dataset_with_gdal.py"),
+                ctx.data,
+                "--terrio",
+                ctx.terrio,
+                "--work-dir",
+                os.path.join(tmp, "outputs"),
+                "--json",
+                report,
+            ]
+        )
+        if code != 0:
+            s.error = tail(err or out)
+            return s
+        try:
+            payload = json.loads(Path(report).read_text())
+            results = payload["cases"]
+            if payload.get("skipped"):
+                s.criteria += " Reference skips: " + "; ".join(f"{item['name']}: {item['detail']}" for item in payload["skipped"])
+        except (OSError, KeyError, json.JSONDecodeError) as e:
+            s.error = str(e)
+            return s
+        for r in results:
+            name = r["name"]
+            group = next(
+                (g for g in ("export-schema", "set-field-type", "make-point") if name.startswith(g)),
+                name.split("-")[0],
+            )
+            s.cases.append(Case(group, name, r["status"], r.get("detail", "")))
+    return s
+
+
+
 def suite_vector_geom(ctx):
     """Vector geometry commands on real data against gdal vector and GEOS."""
     s = Suite(
@@ -1488,10 +1660,18 @@ SUITES = OrderedDict(
         ("geolocation", suite_geolocation),
         ("dem-calc", suite_dem_calc),
         ("pansharpen", suite_pansharpen),
+        ("vector-grid", suite_vector_grid),
+        ("lineref", suite_lineref),
+
+
+        ("raster-query", suite_raster_query),
+        ("raster-pixel", suite_raster_pixel),
+        ("focal", suite_focal),
         ("vector-ops", suite_vector_ops),
         ("multidim", suite_multidim),
         ("topology", suite_topology),
         ("vector-geom", suite_vector_geom),
+        ("vector-dataset", suite_vector_dataset),
         ("footprint", suite_footprint),
         ("analysis-output", suite_analysis_output),
         ("arrow", suite_arrow),

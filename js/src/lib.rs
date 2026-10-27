@@ -12,13 +12,17 @@
 //! const points = readPoints(lazBytes, "lidar.laz", { classes: [2] }); // LAS, LAZ, COPC
 //! ```
 
+mod grid;
 mod multidim;
 mod ops;
+mod pixel;
 #[cfg(feature = "pointcloud")]
 mod pointcloud;
+mod query;
 mod remote;
 #[cfg(feature = "threads")]
 mod threads;
+mod vector_dataset;
 
 use serde::Deserialize;
 use std::cell::{Cell, RefCell};
