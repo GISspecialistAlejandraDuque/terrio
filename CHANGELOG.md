@@ -52,3 +52,16 @@
   as GDAL does: it took a value renormalised over the valid neighbours, which
   moved the edge of the data about a pixel into nodata areas. Several bands
   already behaved so, with unified nodata.
+
+### Shapefile
+
+- In polygon records of several parts, rings that touch themselves at a vertex
+  to enclose a hole, which Esri allows, are now split into an exterior and
+  holes when read, wherever the stored ring starts, as GDAL 3.13 does (GDAL
+  3.12 keeps them as stored). A ring whose loops are not holes (a figure-eight,
+  a loop outside the ring, a spike), and a record of a single ring, are still
+  read as stored, also as GDAL does. The split rings start at the vertex the
+  rings GEOS rebuilds for GDAL start at. The `shapefile-rings` conformance
+  suite compares 18 such cases with GDAL.
+- A hole whose first vertex lies on the exterior now belongs to that exterior.
+  It was read as a polygon of its own.
